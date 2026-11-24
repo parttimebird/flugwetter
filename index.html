@@ -1,0 +1,440 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#eef2ef" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0f1513" media="(prefers-color-scheme: dark)">
+<meta name="description" content="Flugfenster an Schwarzwald-Startplätzen, bewertet nach deinem Pilotenprofil.">
+<title>Flugwetter für mich</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="icon" href="icons/icon-192.png" type="image/png" sizes="192x192">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Flugwetter">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=Barlow+Semi+Condensed:wght@500;600;700&display=swap">
+<style>
+:root { padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); }
+body { margin: 0; }
+/* Layout: eine Spalte wie ein Flugbuch. Oben Kopfzeile mit Datenstand und Reitern, darunter Tageswahl
+   und Startplatz-Karten mit Stundenleiste. Farben: Nebelgrau mit Waldstich, Seeblau für Bedienung,
+   je eine Farbe pro Zone (Chill grün, Progress bernstein, XC violett, No-Go grau). */
+:root {
+  --bg: #eef2ef;
+  --surface: #ffffff;
+  --surface-2: #f5f8f6;
+  --fg: #16211c;
+  --muted: #5a6962;
+  --line: #d4ddd8;
+  --accent: #1c6782;
+  --accent-ink: #ffffff;
+  --accent-soft: #dcebf1;
+  --danger: #a63c28;
+  --warn: #8a5d00;
+  --chill: #2a7f60;
+  --chill-ink: #ffffff;
+  --progress: #e2a33a;
+  --progress-ink: #2b1c00;
+  --xc: #6f48b8;
+  --xc-ink: #ffffff;
+  --nogo: #cfd6d2;
+  --nogo-ink: #3a4640;
+  --bar-track: #e3e9e5;
+  --font-display: "Barlow Semi Condensed", "Arial Narrow", "Roboto Condensed", system-ui, sans-serif;
+  --font-body: "Barlow", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --radius: 10px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1513;
+    --surface: #17201c;
+    --surface-2: #1c2722;
+    --fg: #e3eae6;
+    --muted: #97a79f;
+    --line: #2b3832;
+    --accent: #66b8d6;
+    --accent-ink: #08171d;
+    --accent-soft: #173442;
+    --danger: #f08268;
+    --warn: #e6b450;
+    --chill: #43b58b;
+    --chill-ink: #04190f;
+    --progress: #e8ae4c;
+    --progress-ink: #2b1c00;
+    --xc: #a98be9;
+    --xc-ink: #170c2e;
+    --nogo: #38443e;
+    --nogo-ink: #c3cec8;
+    --bar-track: #26312c;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1513;
+  --surface: #17201c;
+  --surface-2: #1c2722;
+  --fg: #e3eae6;
+  --muted: #97a79f;
+  --line: #2b3832;
+  --accent: #66b8d6;
+  --accent-ink: #08171d;
+  --accent-soft: #173442;
+  --danger: #f08268;
+  --warn: #e6b450;
+  --chill: #43b58b;
+  --chill-ink: #04190f;
+  --progress: #e8ae4c;
+  --progress-ink: #2b1c00;
+  --xc: #a98be9;
+  --xc-ink: #170c2e;
+  --nogo: #38443e;
+  --nogo-ink: #c3cec8;
+  --bar-track: #26312c;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-body);
+  font-size: 16px;
+  line-height: 1.45;
+  -webkit-text-size-adjust: 100%;
+}
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0 0 auto;
+  height: env(safe-area-inset-top, 0px);
+  z-index: 10;
+  background: var(--surface);
+}
+button, input, select { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+a { color: var(--accent); }
+
+.wrap {
+  max-width: 680px;
+  margin: 0 auto;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+
+/* Kopfzeile */
+.top {
+  position: sticky;
+  top: env(safe-area-inset-top, 0px);
+  z-index: 5;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+.top .wrap { padding-block: 10px 0; display: grid; gap: 6px; }
+.brand { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.brand h1 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 1.45rem;
+  letter-spacing: 0.01em;
+  line-height: 1.1;
+}
+.status { font-size: 0.82rem; color: var(--muted); min-height: 1.2em; }
+.status strong { color: var(--fg); font-weight: 600; }
+.status.warn strong { color: var(--warn); }
+[hidden] { display: none !important; }
+.refresh {
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+.tabs { display: flex; gap: 4px; margin-top: 2px; }
+.tabs a {
+  flex: 1;
+  text-align: center;
+  padding: 8px 4px 9px;
+  text-decoration: none;
+  color: var(--muted);
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 1rem;
+  letter-spacing: 0.02em;
+  border-bottom: 3px solid transparent;
+}
+.tabs a[aria-current="page"] { color: var(--fg); border-bottom-color: var(--accent); }
+
+main .wrap { padding-block: 14px 48px; display: grid; gap: 16px; }
+
+/* Tageswahl */
+.days {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+  scrollbar-width: none;
+}
+.days::-webkit-scrollbar { display: none; }
+.day {
+  flex: 0 0 auto;
+  min-width: 78px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: var(--radius);
+  padding: 7px 10px 8px;
+  text-align: left;
+  display: grid;
+  gap: 1px;
+}
+.day .d1 { font-family: var(--font-display); font-weight: 600; font-size: 1.02rem; }
+.day .d2 { font-size: 0.78rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.day[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
+.day .dots { display: flex; gap: 3px; margin-top: 4px; height: 6px; }
+.day .dots i { width: 6px; height: 6px; border-radius: 50%; }
+.day .dots i:not([class]) { background: var(--nogo); }
+
+.filters { display: flex; gap: 6px; flex-wrap: wrap; }
+.chip {
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 0.88rem;
+}
+.chip[aria-pressed="true"] { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+
+.dayhead { display: grid; gap: 2px; }
+.dayhead h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 1.25rem;
+  text-wrap: balance;
+}
+.dayhead p { margin: 0; color: var(--muted); font-size: 0.88rem; }
+
+.group { display: grid; gap: 10px; }
+.group > h3 {
+  margin: 4px 0 0;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+/* Startplatz-Karte */
+.card {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px 14px 12px;
+}
+.card:hover { border-color: var(--accent); }
+.card .row1 { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+.card .name { font-family: var(--font-display); font-weight: 600; font-size: 1.15rem; line-height: 1.15; }
+.card .meta { font-size: 0.82rem; color: var(--muted); }
+.fit {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 1.2rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.fit small { font-family: var(--font-body); font-weight: 500; font-size: 0.72rem; color: var(--muted); margin-left: 2px; }
+.wins { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.z-chill { background: var(--chill); color: var(--chill-ink); }
+.z-progress { background: var(--progress); color: var(--progress-ink); }
+.z-xc { background: var(--xc); color: var(--xc-ink); }
+.z-no-go { background: var(--nogo); color: var(--nogo-ink); }
+
+/* Stundenleiste */
+.strip { display: grid; gap: 3px; }
+.strip .bars { display: flex; gap: 2px; height: 14px; }
+.strip .bars span { flex: 1; border-radius: 2px; }
+.strip .bars span.weak { opacity: 0.4; }
+.strip .bars span.past { opacity: 0.25; }
+.strip .ticks { display: flex; justify-content: space-between; font-size: 0.7rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.nogo-list { display: grid; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+.nogo-list button {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-top: 1px solid var(--line);
+  padding: 10px 14px;
+}
+.nogo-list button:first-child { border-top: 0; }
+.nogo-list .n { font-weight: 600; }
+.nogo-list .r { color: var(--muted); font-size: 0.85rem; text-align: right; }
+
+.empty {
+  background: var(--surface);
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+  padding: 14px;
+  color: var(--muted);
+}
+
+/* Detailansicht */
+.back { justify-self: start; background: none; border: 0; padding: 0; color: var(--accent); font-weight: 600; }
+.spothead h2 { margin: 0; font-family: var(--font-display); font-weight: 700; font-size: 1.6rem; line-height: 1.1; text-wrap: balance; }
+.spothead p { margin: 4px 0 0; color: var(--muted); font-size: 0.9rem; }
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px 16px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  margin: 0;
+}
+.facts div { min-width: 0; }
+.facts dt { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); }
+.facts dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; }
+.verdict { margin: 0; font-weight: 600; }
+.sun { margin: 2px 0 0; color: var(--muted); font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+
+.hours { display: grid; gap: 8px; }
+.hour {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  display: grid;
+  gap: 8px;
+}
+.hour.past { opacity: 0.55; }
+.hour .h1 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.hour time { font-family: var(--font-display); font-weight: 700; font-size: 1.1rem; font-variant-numeric: tabular-nums; min-width: 3.1em; }
+.hour .fitline { margin-left: auto; font-size: 0.85rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.hour .fitline b { color: var(--fg); font-size: 1rem; }
+.dims { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.dim { display: grid; gap: 3px; min-width: 0; }
+.dim .dl { display: flex; justify-content: space-between; gap: 4px; font-size: 0.74rem; color: var(--muted); }
+.dim .dl b { color: var(--fg); font-family: var(--font-display); font-size: 0.95rem; }
+.bar { position: relative; height: 6px; border-radius: 3px; background: var(--bar-track); }
+.bar > span { position: absolute; inset: 0 auto 0 0; border-radius: 3px; background: var(--accent); }
+.bar > span.over { background: var(--danger); }
+.bar > i { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--fg); opacity: 0.55; border-radius: 1px; }
+.keydata { margin: 0; font-size: 0.85rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.notes { margin: 0; padding: 0; list-style: none; display: grid; gap: 3px; font-size: 0.88rem; }
+.notes li { padding-left: 1.1em; position: relative; }
+.notes li::before { position: absolute; left: 0; top: 0; }
+.notes li.nogo { color: var(--danger); }
+.notes li.nogo::before { content: "✕"; }
+.notes li.warn { color: var(--warn); }
+.notes li.warn::before { content: "!"; font-weight: 700; left: 0.25em; }
+.notes li.info { color: var(--muted); }
+.notes li.info::before { content: "·"; font-weight: 700; left: 0.3em; }
+details.why summary { font-size: 0.85rem; color: var(--accent); cursor: pointer; }
+details.why ul { margin: 6px 0 0; padding-left: 1.1em; font-size: 0.85rem; color: var(--muted); display: grid; gap: 2px; }
+
+.box {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  display: grid;
+  gap: 8px;
+}
+.box h3 { margin: 0; font-family: var(--font-display); font-size: 1.1rem; font-weight: 700; }
+.box p, .box ul { margin: 0; }
+.box ul { padding-left: 1.1em; display: grid; gap: 4px; }
+.small { font-size: 0.82rem; color: var(--muted); }
+
+/* Profil */
+.seg { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.seg button {
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: var(--radius);
+  padding: 8px 6px;
+  display: grid;
+  gap: 2px;
+  text-align: center;
+}
+.seg button b { font-family: var(--font-display); font-size: 1.05rem; }
+.seg button span { font-size: 0.74rem; color: var(--muted); line-height: 1.25; }
+.seg button[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
+.slider { display: grid; gap: 2px; }
+.slider label { display: flex; justify-content: space-between; gap: 8px; font-size: 0.9rem; }
+.slider output { font-weight: 700; font-variant-numeric: tabular-nums; font-family: var(--font-display); }
+.slider input[type="range"] { width: 100%; accent-color: var(--accent); }
+.slider .hint { font-size: 0.78rem; color: var(--muted); }
+.dimset { display: grid; gap: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
+.dimset:first-of-type { border-top: 0; padding-top: 0; }
+.dimset h4 { margin: 0; font-family: var(--font-display); font-size: 1.02rem; }
+.req { display: grid; grid-template-columns: auto 1fr; gap: 6px 10px; align-items: center; }
+.req input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent); }
+.summary { font-weight: 600; }
+.btn {
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  border-radius: 8px;
+  padding: 8px 14px;
+  justify-self: start;
+}
+
+.legend { display: flex; flex-wrap: wrap; gap: 6px; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .card, .day, .chip { transition: border-color 0.15s ease, background-color 0.15s ease; }
+}
+@media (max-width: 420px) {
+  .dims { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <div class="brand">
+      <h1>Flugwetter für mich</h1>
+      <button class="refresh" id="refresh" type="button">Aktualisieren</button>
+    </div>
+    <div class="status" id="status" role="status">Lade Vorhersage …</div>
+    <nav class="tabs" aria-label="Ansichten">
+      <a href="#fenster" id="tab-fenster" aria-current="page">Flugfenster</a>
+      <a href="#profil" id="tab-profil">Profil</a>
+      <a href="#info" id="tab-info">Info</a>
+    </nav>
+  </div>
+</header>
+<main>
+  <div class="wrap" id="view"><p class="empty">Lade Vorhersage …</p></div>
+</main>
+<script>
+"use strict";(()=>{var R={pilot_id:"standard",comfort_profile:{base_model:"community",pilot_profile:"progress",tolerance:{wind_comfort:{max_score_acceptable:4,importance_weight:1},thermic_character:{max_score_acceptable:4,importance_weight:1.2},shear_turbulence:{max_score_acceptable:3,importance_weight:1.5},structure_cap:{max_score_acceptable:4,importance_weight:.8}},min_required_scores_for_goal:{chill:{thermic_character_min:1,wind_comfort_max:3},progress:{thermic_character_min:2,shear_turbulence_max:4},xc:{thermic_character_min:3,wind_comfort_max:5,shear_turbulence_max:5}}}};var E=e=>`DHV-Gel\xE4ndedatenbank, Gel\xE4nde ${e}`,P=(e,t,n)=>`Windfenster ${e}\u2013${t}\xB0 und Windgrenze ${n} km/h habe ich aus der Startrichtung abgeleitet.`,x={rossbuehl:{id:"oppenau-rossbuehl",name:"Oppenau Rossb\xFChl (Zuflucht)",region:"Nordschwarzwald",club:"Oppenauer Gleitschirmflieger e.V.",url:"https://www.oppenauer-gleitschirmflieger.de/",dhvItem:974,lat:48.48696,lon:8.23912},schaefersfeld:{id:"oppenau-schaefersfeld",name:"Oppenau Sch\xE4fersfeld",region:"Nordschwarzwald",club:"Oppenauer Gleitschirmflieger e.V.",url:"https://www.oppenauer-gleitschirmflieger.de/",dhvItem:1046,lat:48.43571,lon:8.15204},merkur:{id:"merkur",name:"Baden-Baden Merkur",region:"Nordschwarzwald",club:"Gleitschirmverein Baden e.V. (Schwarzwaldgeier)",url:"https://www.schwarzwaldgeier.de/",dhvItem:987,lat:48.76473,lon:8.27942},teufelsmuehle:{id:"teufelsmuehle",name:"Teufelsm\xFChle (Loffenau)",region:"Nordschwarzwald",club:"Drachen- und Gleitschirmclub Loffenau e.V.",url:"https://teufels-flieger.de/",dhvItem:191,lat:48.75668,lon:8.40718},gschasi:{id:"gschasi",name:"Gschasi (Elzach-Prechtal)",region:"Mittlerer Schwarzwald",club:"Elztalflieger e.V.",url:"https://www.elztalflieger.de/",dhvItem:289,lat:48.18619,lon:8.12869},kandel:{id:"kandel",name:"Kandel (Waldkirch)",region:"Mittlerer Schwarzwald",club:"Drachen-Gleitschirmfliegerclub S\xFCdschwarzwald e.V. (DGFC)",url:"https://www.dgfc-suedschwarzwald.de/",dhvItem:1169,lat:48.06523,lon:8.01523},schauinsland:{id:"schauinsland",name:"Freiburg Schauinsland",region:"S\xFCdschwarzwald",club:"GSC Colibri Freiburg e.V. (Gleitschirm) mit DGFC S\xFCdschwarzwald (Drachen)",url:"https://www.gsccolibri.de/",dhvItem:575,lat:47.90974,lon:7.8896},hochblauen:{id:"hochblauen",name:"Hochblauen (Badenweiler)",region:"S\xFCdschwarzwald",club:"H\xE4ngegleiter Club Region Blauen e.V. (HCRB)",url:"https://hcrb.de/",dhvItem:301,lat:47.77658,lon:7.70002}},Ie=["Lokaler Wind ist am Merkur oft deutlich st\xE4rker als vorhergesagt.","Steiler Startplatz, Platz f\xFCr h\xF6chstens zwei ausgelegte Schirme; Abstand zur Bergbahn halten.","Einweisung durch den Verein vor dem ersten Flug."],Ve=["Start im Wald: nur bei eindeutigem Gegenwind, Start mit Seiten- oder R\xFCckenwind ist laut Auflage nicht zul\xE4ssig.","Naturschutzgebiet Lautenfelsen nicht \xFCberfliegen, Vogelschutzgebiet nur mit mindestens 300 m.","Alle Piloten brauchen eine Ersteinweisung durch den Verein."],Ue=["Einweisung beim ersten Flug; Gastpiloten mit Gleitschirm brauchen den B-Schein (G\xE4steregelung DGFC).","Wanderfalken-Schutzzone und Gel\xE4ndeordnung beachten.","Landepl\xE4tze Glottertal, Heimeck, Siensbach: aktuelle Einteilung auf der Vereinsseite."],ge=["Mai 2025: Startplatz wegen einer Baustelle stark verkleinert, Starts sehr anspruchsvoll. Vor dem Flug beim HCRB nachsehen.","Alle Piloten brauchen eine Einweisung; G\xE4ste mit B-Schein nur, wenn ein HCRB-Einweiser vor Ort ist.","Weite Gleitstrecke zum Landeplatz, kaum Notlandefl\xE4chen."],be={floorMsl:1676,note:"Luftraum D Basel beginnt westlich des Hochblauen schon bei 5500 ft (1676 m NN)"},Y=[{id:"oppenau-west",site:x.rossbuehl,name:"Oppenau West (Rossb\xFChl)",lat:48.48696,lon:8.23912,elevation:930,facing:247,windSector:{from:205,to:290},maxWindKmh:25,landing:{name:"Nockenbauernhof (Toplanden ist \xFCblich)",lat:48.47972,lon:8.22139,elevation:500},dangerRules:[{sector:{from:330,to:120},minKmh:15,level:"takeoff",reason:"Gel\xE4ndeauflage: kein Start bei n\xF6rdlichen oder \xF6stlichen Winden \xFCber 15 km/h (Lee am Landeplatz m\xF6glich)."}],operatingHours:{afterSunriseH:2,beforeSunsetH:1},notes:["Startplatz auf dem Schwarzwald-Hauptkamm, thermisch zuverl\xE4ssig.","Flugbetrieb fr\xFChestens 2 h nach Sonnenaufgang, letzter Start 1 h vor Sonnenuntergang (Auflage, ist eingerechnet).","Naturschutzgebiet hinter dem Start: dort mindestens 300 m \xFCber Grund.","Einweisung durch die Oppenauer Gleitschirmflieger n\xF6tig."],sources:[E(974),"Holfuy-Station 1593 \u201EZuflucht-Rossb\xFChl SW\u201C","APPI FlyZone 4097"],needsReview:[P(205,290,25)]},{id:"oppenau-ost",site:x.schaefersfeld,name:"Oppenau Ost (Sch\xE4fersfeld)",lat:48.43571,lon:8.15204,elevation:770,facing:112,windSector:{from:70,to:150},maxWindKmh:20,landing:{name:"Bruhansenhof (mit \xDCbungshang)",lat:48.45115,lon:8.16544,elevation:305},dangerRules:[],needsHeadwind:!0,operatingHours:{afterSunriseH:2,beforeSunsetH:1},notes:["Schneisenstart, deshalb nur bei Gegenwind starten.","Flugbetrieb fr\xFChestens 2 h nach Sonnenaufgang, letzter Start 1 h vor Sonnenuntergang (Auflage, ist eingerechnet).","Am Wochenende und an Feiertagen gibt es einen Startleiter.","Nur den Landeplatz Bruhansenhof nutzen, die Wiese L\xF6cherberg ist nur Notlandeplatz.","\xDCber dem Schutzgebiet bei Thermik nur h\xF6her als 300 m \xFCber Grund."],sources:[E(1046)],needsReview:[P(70,150,20)]},{id:"merkur-west",site:x.merkur,name:"Merkur West",lat:48.76473,lon:8.27942,elevation:651,facing:255,windSector:{from:200,to:285},maxWindKmh:25,landing:{name:"Gro\xDFmatte (leicht abfallend, bei Thermik bockig)",lat:48.76371,lon:8.26112,elevation:240},dangerRules:[{sector:{from:290,to:345},minKmh:8,level:"takeoff",reason:"Nordwest gilt am Merkur als gef\xE4hrlich."}],notes:Ie,sources:[E(987),"APPI FlyZone 4167 (Ausrichtung WSW, SSW bedingt, NW gef\xE4hrlich)"],needsReview:[P(200,285,25)]},{id:"merkur-nordost",site:x.merkur,name:"Merkur Nordost",lat:48.76466,lon:8.28157,elevation:653,facing:45,windSector:{from:20,to:70},maxWindKmh:20,landing:{name:"Neuhaus Staufenberg",lat:48.76692,lon:8.29526,elevation:360},dangerRules:[],needsHeadwind:!0,notes:["Anspruchsvoller Start, die Schneise ist noch enger als am Weststart.",...Ie],sources:[E(987)],needsReview:[P(20,70,20)]},{id:"teufelsmuehle-west",site:x.teufelsmuehle,name:"Teufelsm\xFChle West",lat:48.75668,lon:8.40718,elevation:890,facing:270,windSector:{from:240,to:300},maxWindKmh:25,landing:{name:"Loffenau (leicht abfallend)",lat:48.77271,lon:8.39811,elevation:389},dangerRules:[],needsHeadwind:!0,notes:["Gro\xDFz\xFCgiger, anf\xE4ngertauglicher Startplatz.",...Ve],sources:[E(191)],needsReview:[P(240,300,25)]},{id:"teufelsmuehle-nordwest",site:x.teufelsmuehle,name:"Teufelsm\xFChle Nordwest",lat:48.75827,lon:8.40604,elevation:834,facing:315,windSector:{from:290,to:340},maxWindKmh:20,landing:{name:"Loffenau (leicht abfallend)",lat:48.77271,lon:8.39811,elevation:389},dangerRules:[],needsHeadwind:!0,notes:["Relativ enge Waldschneise.",...Ve],sources:[E(191)],needsReview:[P(290,340,20)]},{id:"gschasi",site:x.gschasi,name:"Gschasi",lat:48.18619,lon:8.12869,elevation:990,facing:260,windSector:{from:210,to:305},maxWindKmh:25,landing:{name:"Landeplatz Gschasi",lat:48.19479,lon:8.11006,elevation:480},dangerRules:[],notes:["Guter Einstieg in die Schwarzwaldthermik; der Westhang tr\xE4gt vor allem nachmittags bis in den Abend.","Auffahrt mit dem Vereinsbus der Elztalflieger. Laut DHV keine besonderen Auflagen."],sources:[E(289)],needsReview:[P(210,305,25)]},{id:"kandel-west",site:x.kandel,name:"Kandel West (mit Rampe)",lat:48.06523,lon:8.01523,elevation:1200,facing:270,windSector:{from:210,to:330},maxWindKmh:25,landing:{name:"Glottertal, Heimeck oder Siensbach",elevation:370},dangerRules:[],notes:["Wichtigster Startplatz am Kandel (Gleitschirme auf der Wiese neben der Drachenrampe).",...Ue],sources:[E(1169)],needsReview:[P(210,330,25)]},{id:"kandel-sued",site:x.kandel,name:"Kandel S\xFCd (Gummen-H\xFCtte)",lat:48.05684,lon:8.01309,elevation:1150,facing:195,windSector:{from:165,to:220},maxWindKmh:20,landing:{name:"Glottertal",lat:48.04552,lon:7.9718,elevation:380},dangerRules:[],notes:["Oberer Startplatz. Laut DHV-Stellungnahme (Dezember 2024) nur bei Wind aus S\xFCd bis S\xFCds\xFCdwest bis 20 km/h.",...Ue],sources:[E(1169),"DHV-Stellungnahme Kandel vom 16.12.2024"],needsReview:["Windfenster 165\u2013220\xB0 habe ich aus der DHV-Stellungnahme (S\xFCd bis S\xFCds\xFCdwest, 20 km/h) abgeleitet."]},{id:"schauinsland",site:x.schauinsland,name:"Schauinsland (Rotlache)",lat:47.90974,lon:7.8896,elevation:1180,facing:260,windSector:{from:235,to:300},maxWindKmh:25,landing:{name:"Talstation Schauinslandbahn",lat:47.93339,lon:7.86512,elevation:490},dangerRules:[{sector:{from:60,to:200},minKmh:5,level:"above",reason:"Bei S\xFCd- und Ostwind (auch schwachem) gibt es gro\xDFr\xE4umige Rotoren, selbst wenn am Start sauberer Gegenwind steht."}],notes:["Sehr lange Gleitstrecke \xFCber Wald: Gleitzahl mindestens 5,5 bis 6 n\xF6tig, kein Toplanden.","H\xF6chstens 30 Starts pro Tag; 100 m Abstand zu den Seilen der Schauinslandbahn.","Einweisung durch den Verein erforderlich."],sources:[E(575),"Holfuy-Station 517 \u201EStartplatz Schauinsland \u2013 GSC Colibri Freiburg\u201C (260\xB0, Lee-Warnung)"],needsReview:[P(235,300,25)]},{id:"hochblauen-suedwest",site:x.hochblauen,name:"Hochblauen S\xFCdwest",lat:47.77658,lon:7.70002,elevation:1152,facing:205,windSector:{from:175,to:235},maxWindKmh:25,landing:{name:"Lipberg",lat:47.79024,lon:7.65788,elevation:448},dangerRules:[],airspace:be,notes:["Auffahrtsstra\xDFe und Wanderweg unter dem Start mit genug Abstand \xFCberfliegen.",...ge],sources:[E(301)],needsReview:[P(175,235,25)]},{id:"hochblauen-ost",site:x.hochblauen,name:"Hochblauen Ost",lat:47.7767,lon:7.69999,elevation:1153,facing:90,windSector:{from:60,to:120},maxWindKmh:25,landing:{name:"Lipberg",lat:47.79024,lon:7.65788,elevation:448},dangerRules:[],airspace:be,notes:["Nur Gleitschirme. Mit A-Schein zus\xE4tzliche Einweisung n\xF6tig.","Behelfslandeplatz Marzell (694 m) liegt auf der Ostseite.",...ge],sources:[E(301)],needsReview:[P(60,120,25),"Welcher Landeplatz vom Oststart aus \xFCblich ist, wei\xDF ich nicht."]},{id:"hochblauen-nord",site:x.hochblauen,name:"Hochblauen Nord",lat:47.77846,lon:7.70001,elevation:1166,facing:11,windSector:{from:340,to:45},maxWindKmh:25,landing:{name:"Lipberg",lat:47.79024,lon:7.65788,elevation:448},dangerRules:[],airspace:be,notes:["Sehr lange Flugstrecke zum Landeplatz: nur starten, wenn Bedingungen und Schirm das sicher hergeben.",...ge],sources:[E(301)],needsReview:[P(340,45,25)]}],se=[...new Map(Y.map(e=>[e.site.id,e.site])).values()];function we(e){return 6.112*Math.exp(17.62*e/(243.12+e))}function Se(e,t){let n=Math.min(Math.max(t,1),100),r=Math.log(n/100)+17.62*e/(243.12+e);return 243.12*r/(17.62-r)}function Ze(e,t){return Math.min(100,100*we(t)/we(e))}function An(e,t){let n=e+273.15,r=we(e),o=.622*r/Math.max(t-r,1),i=9.81*(1+2501e3*o/(287.04*n)),a=1005+2501e3*2501e3*o*.622/(287.04*n*n);return i/a}function Gn(e,t){return Math.max(0,(e-t)/(.0098-.0018))}function J(e,t,n){if(e.length===0)return NaN;if(t<=e[0].z)return n(e[0]);for(let r=1;r<e.length;r++){let o=e[r];if(t<=o.z){let i=e[r-1],a=(t-i.z)/(o.z-i.z);return n(i)+a*(n(o)-n(i))}}return n(e[e.length-1])}function X(e,t){return J(e,t,n=>n.t)}function je(e,t){return J(e,t,n=>n.td)}function Nn(e,t){if(e.length===0)return 1013.25*Math.exp(-t/8400);let n=J(e,t,o=>Math.log(o.p)),r=e[e.length-1];return t>r.z?r.p*Math.exp(-(t-r.z)/8e3):Math.exp(n)}function ae(e,t){let n=t*Math.PI/180;return{u:-e*Math.sin(n),v:-e*Math.cos(n)}}function ve(e,t){let n=Math.hypot(e,t),r=Math.atan2(-e,-t)*180/Math.PI;return r<0&&(r+=360),{speed:n,dir:n<.05?0:r,u:e,v:t}}function Q(e,t){let n=J(e,t,o=>o.u),r=J(e,t,o=>o.v);return ve(n,r)}function I(e,t){let n=(e%360+360)%360,r=(t.from%360+360)%360,o=(t.to%360+360)%360;return r<=o?n>=r&&n<=o:n>=r||n<=o}function Me(e,t){return Math.abs(((e-t)%360+540)%360-180)}var On=["N","NNO","NO","ONO","O","OSO","SO","SSO","S","SSW","SW","WSW","W","WNW","NW","NNW"];function y(e){return On[Math.round((e%360+360)%360/22.5)%16]}function qe(e,t,n=7e3){let o=t.z+Gn(t.t,t.td),i=[],a=t.t,u=t.z,l=null,c=!0,m=!1;for(let p=t.z+25;p<=n;p+=25){let b=Nn(e,p);p<=o?a-=.0098*25:(m=!0,a-=An(a,b)*25);let h=X(e,p)-a;i.push({z:p,ti:h});let g=h<0;if(m)if(g)l=p;else break;else if(g&&c&&(u=p),!g&&p-t.z>50){c=!1;break}}return m&&u<o&&(u=o),{dryTop:u,lcl:o,cloudTop:m&&l!==null?l:null,ti:i}}function Ye(e,t,n,r){if(e<=0||t<=0)return 0;let o=r*100/(287.04*(n+273.15)),i=e/(o*1005);return Math.cbrt(9.81/(n+273.15)*i*t)}function Cn(e,t){let[n,r,o]=e.split("-").map(Number),i=new Date(Date.UTC(n,r-1,o,12)),a=new Intl.DateTimeFormat("en-GB",{timeZone:t,hour:"2-digit",hourCycle:"h23"}).format(i);return Number(a)-12}function ee(e,t,n,r="Europe/Berlin"){let[o,i,a]=n.split("-").map(Number),u=Math.round((Date.UTC(o,i-1,a)-Date.UTC(o,0,0))/864e5),l=2*Math.PI/365*(u-1),c=229.18*(75e-6+.001868*Math.cos(l)-.032077*Math.sin(l)-.014615*Math.cos(2*l)-.040849*Math.sin(2*l)),m=.006918-.399912*Math.cos(l)+.070257*Math.sin(l)-.006758*Math.cos(2*l)+907e-6*Math.sin(2*l)-.002697*Math.cos(3*l)+.00148*Math.sin(3*l),p=e*Math.PI/180,b=Math.cos(90.833*Math.PI/180)/(Math.cos(p)*Math.cos(m))-Math.tan(p)*Math.tan(m),w=Math.acos(Math.max(-1,Math.min(1,b)))*180/Math.PI,h=Cn(n,r),g=720-4*(t+w)-c,f=720-4*(t-w)-c;return{sunrise:g/60+h,sunset:f/60+h}}function L(e){let t=Math.round(e*60);return`${String(Math.floor(t/60)).padStart(2,"0")}:${String(t%60).padStart(2,"0")}`}var ke=[1e3,975,950,925,900,850,800,700,600,500],Qe=[80,120,180],Fn=["temperature_2m","dew_point_2m","relative_humidity_2m","surface_pressure","precipitation","rain","showers","precipitation_probability","weather_code","cloud_cover","cloud_cover_low","cloud_cover_mid","cloud_cover_high","visibility","wind_speed_10m","wind_direction_10m","wind_gusts_10m",...Qe.flatMap(e=>[`wind_speed_${e}m`,`wind_direction_${e}m`,`temperature_${e}m`]),"cape","convective_inhibition","freezing_level_height","shortwave_radiation","sunshine_duration","is_day"],Bn=["temperature","relative_humidity","wind_speed","wind_direction","geopotential_height"],Je=e=>e.flatMap(t=>Bn.map(n=>`${n}_${t}hPa`)),en=[Fn,Je(ke.slice(0,5)),Je(ke.slice(5))];function _e(e,t={},n=en.flat()){return`https://api.open-meteo.com/v1/forecast?${new URLSearchParams({latitude:String(e.lat),longitude:String(e.lon),elevation:"nan",models:t.model??"icon_seamless",timezone:t.timezone??"Europe/Berlin",forecast_days:String(t.forecastDays??5),wind_speed_unit:"ms",hourly:n.join(",")}).toString()}`}function W(e,t,n){let r=e[t];if(!r)return null;let o=r[n];return o==null||Number.isNaN(o)?null:o}function z(e,t,n,r=0){return W(e,t,n)??r}function Xe(e,t=5){return e.filter((n,r)=>r===0||n.z-e[r-1].z>=t)}function nn(e,t={}){if(e.error)throw new Error(`Open-Meteo: ${e.reason??"unbekannter Fehler"}`);let n=e.hourly,r=e.elevation,o=[];for(let i=0;i<n.time.length;i++){let a=z(n,"temperature_2m",i),u=W(n,"relative_humidity_2m",i),l=Math.min(a,W(n,"dew_point_2m",i)??(u!==null?Se(a,u):a-5)),c=z(n,"surface_pressure",i,1013.25*Math.exp(-r/8400)),m=[{z:r+2,t:a,td:l,p:c}],p=z(n,"wind_speed_10m",i),b=z(n,"wind_direction_10m",i),w=[{z:r+10,...ae(p,b)}];for(let f of Qe){let S=W(n,`wind_speed_${f}m`,i),D=W(n,`wind_direction_${f}m`,i);S!==null&&D!==null&&w.push({z:r+f,...ae(S,D)});let K=W(n,`temperature_${f}m`,i);K!==null&&m.push({z:r+f,t:K,td:Math.min(K,l-.0018*f),p:c*Math.exp(-f/8400)})}for(let f of ke){let S=W(n,`geopotential_height_${f}hPa`,i);if(S===null)continue;let D=W(n,`temperature_${f}hPa`,i),K=W(n,`relative_humidity_${f}hPa`,i);D!==null&&S>r+30&&f<c&&m.push({z:S,t:D,td:K!==null?Se(D,K):D-10,p:f});let $=W(n,`wind_speed_${f}hPa`,i),N=W(n,`wind_direction_${f}hPa`,i);$!==null&&N!==null&&S>r+190&&w.push({z:S,...ae($,N)})}m.sort((f,S)=>f.z-S.z),w.sort((f,S)=>f.z-S.z);let h=Xe(m),g=Xe(w);o.push({time:n.time[i],isDay:z(n,"is_day",i)===1,surface:{z:r,t2m:a,td2m:l,pSurf:c,ws10:p,wd10:b,gust10:z(n,"wind_gusts_10m",i,p),precip:z(n,"precipitation",i),precipProb:W(n,"precipitation_probability",i),weatherCode:z(n,"weather_code",i),cloudCover:z(n,"cloud_cover",i),cloudLow:z(n,"cloud_cover_low",i),cloudMid:z(n,"cloud_cover_mid",i),cloudHigh:z(n,"cloud_cover_high",i),visibility:z(n,"visibility",i,5e4),cape:z(n,"cape",i),swRad:z(n,"shortwave_radiation",i),freezingLevel:W(n,"freezing_level_height",i)},thermo:h,wind:g})}return{source:"open-meteo",model:t.model??"icon_seamless",fetchedAt:t.fetchedAt??new Date().toISOString(),modelElevation:r,hours:o}}async function In(e,t){let n="";for(let r=0;r<=t;r++){r>0&&await new Promise(u=>setTimeout(u,1500*r));let i=await(await fetch(e)).text(),a;try{a=JSON.parse(i)}catch{n=i.slice(0,200);continue}if(a.error&&/limit/i.test(a.reason??""))throw new Error(`Open-Meteo: Abruflimit erreicht (${a.reason})`);if(a.error)throw new Error(`Open-Meteo: ${a.reason??"unbekannter Fehler"}`);return a}throw new Error(`Open-Meteo antwortet nicht mit Daten: ${n}`)}async function tn(e,t={},n=3){let r=null;for(let o of en){let i=await In(_e(e,t,o),n);if(!r)r=i;else for(let[a,u]of Object.entries(i.hourly))a!=="time"&&(r.hourly[a]=u)}return r}var V={wind:{takeoff:[[0,0],[5,1],[10,2],[15,3],[22,4],[30,5]],layerOffset:.5,gustSpread:[[0,0],[10,1],[15,2],[20,3],[28,4],[36,5]],gustOffset:.5},thermal:{sensibleHeatFraction:.3,wStar:[[0,0],[.6,.5],[1,1],[1.5,2],[2,3],[2.6,4],[3.3,5]],coreFactor:1.3,gliderSink:1.1,cape:[[0,0],[300,0],[600,3.5],[1e3,4.5],[1500,5]]},shear:{shear:[[0,0],[2,.5],[4,1.5],[6,2.5],[8,3.5],[11,4.5],[14,5]],gustSpread:[[0,0],[8,1],[12,2],[16,3],[22,4],[30,5]],gustFactor:[[1,0],[1.3,1],[1.5,2],[1.6,3],[1.8,4],[2.1,5]],windToThermal:[[0,0],[2,.5],[3,1.5],[4,2.5],[5,3.5],[7,4.5]],thermalTurbulence:[[1.5,0],[2.2,1.5],[2.8,2.5],[3.3,3.5]],comboBonus:.3},structure:{workingHeight:[[0,0],[200,.5],[500,1.5],[900,2.5],[1400,3.2],[2e3,3.8]],cloudDepth:[[0,0],[1e3,0],[1500,3.5],[2500,4.2],[3500,5]]},rules:{minWindForDirectionKmh:8,minWindForDirectionLaneKmh:5,laneMinHeadwindKmh:5,maxTailwindKmh:5,maxPrecip:.2,fogRh:97,minVisibility:3e3,minBaseAboveTakeoff:150,gustMarginKmh:12,leeMinKmh:12},zones:{noGoWind:4.5,noGoShear:4.5,noGoStructure:4.8,xcThermal:2.8,xcStructure:2.5,xcMaxWind:3.5,xcMaxShear:3.5,progressThermal:1.8,progressWind:2.5,progressShear:2.8},windowMinFit:60};function H(e,t){if(!Number.isFinite(t)||t<=e[0][0])return e[0][1];for(let n=1;n<e.length;n++){let[r,o]=e[n];if(t<=r){let[i,a]=e[n-1];return a+(o-a)*(t-i)/(r-i)}}return e[e.length-1][1]}var A=3.6,M=e=>Math.round(e),_=e=>Math.round(e*10)/10;function rn(e,t,n){let r=t.surface,o=e.elevation,i=Math.max(o,r.z+80),a=Q(t.wind,i),u=((a.dir-e.facing)%360+540)%360-180,l=a.speed*Math.cos(u*Math.PI/180),c=Math.abs(a.speed*Math.sin(u*Math.PI/180)),m=0,p=0,b=0;for(let v=o+200;v<=o+800;v+=100){let k=Q(t.wind,v);m+=k.u,p+=k.v,b++}let w=ve(m/b,p/b),h=qe(t.thermo,{z:r.z+2,t:r.t2m,td:r.td2m}),g=t.isDay&&r.swRad>=30,f=h.cloudTop!==null,S=f?h.lcl:h.dryTop;g||(S=r.z);let D=Math.max(0,S-r.z),K=g?n.thermal.sensibleHeatFraction*r.swRad:0,$=Ye(K,D,r.t2m,r.pSurf),N=Math.max(0,n.thermal.coreFactor*$-n.thermal.gliderSink),O=null;if(g){let v=Math.max(o,r.z+100);for(let k of h.ti)k.z>=v&&k.z<=S&&(O=O===null?k.ti:Math.min(O,k.ti))}let T=null,B=t.thermo.find(v=>v.p===850);if(g&&B){let v=h.ti.reduce((k,q)=>k===null||Math.abs(q.z-B.z)<Math.abs(k.z-B.z)?q:k,null);v&&Math.abs(v.z-B.z)<=25&&(T=v.ti)}let Ce=Math.max(i+300,Math.min(S,o+1500)),Wn=Math.max(o,r.z+150),me=0,Fe=0,Be=0,fe=0;for(let v=i;v<=Ce;v+=50){let k=Q(t.wind,v);if(me=Math.max(me,k.speed),Fe+=k.speed,Be++,v>=Wn&&v+300<=Ce+1){let q=Q(t.wind,v+300),Rn=Math.hypot(q.u-k.u,q.v-k.v);fe=Math.max(fe,Rn/.3)}}let oe=null,Hn=Math.max(r.z+2,S-100);for(let v=Hn;v<=S+600;v+=50){let k=X(t.thermo,v+200)-X(t.thermo,v);k>.3&&(!oe||k>oe.strengthK)&&(oe={baseMsl:M(v),strengthK:_(k)})}let pe=Math.max(r.ws10,a.speed),Pn=X(t.thermo,Math.max(o,r.z+2)),Ln=je(t.thermo,Math.max(o,r.z+2));return{takeoffWindKmh:_(a.speed*A),takeoffWindDir:M(a.dir),headwindKmh:_(l*A),crosswindKmh:_(c*A),windAboveKmh:_(w.speed*A),windAboveDir:M(w.dir),layerMaxWindKmh:_(me*A),layerMeanWindKmh:_(Fe/Math.max(Be,1)*A),gustKmh:_(r.gust10*A),gustSpreadKmh:_(Math.max(0,r.gust10-pe)*A),gustFactor:pe*A>=10?_(r.gust10/pe):null,shearPerKm:_(fe),thermalTopMsl:M(S),cloudBaseMsl:g&&f?M(h.lcl):null,cloudTopMsl:g&&f&&h.cloudTop!==null?M(h.cloudTop):null,workingHeight:M(S-o),wStar:_($),climbEstimate:_(N),tiMin:O===null?null:_(O),ti850:T===null?null:_(T),inversion:oe,cape:M(r.cape),rhTakeoff:M(Ze(Pn,Ln)),precip:r.precip,weatherCode:r.weatherCode,cloudCover:r.cloudCover,cloudHigh:Math.max(r.cloudHigh,r.cloudMid),swRad:M(r.swRad)}}var Vn={wind_comfort:["windstill","schwacher Wind","m\xE4\xDFiger Wind","frischer Wind","kr\xE4ftiger Wind","zu viel Wind"],thermic_character:["keine Thermik","schwach und flach","moderat","gut nutzbar","kr\xE4ftig, sportlich","extrem, \xDCberentwicklung"],shear_turbulence:["glatt","ruhig","leicht bewegt","bewegt","ruppig","sehr ruppig"],structure_cap:["kein Raum \xFCber dem Start","flach gedeckelt","Hausbart-H\xF6hen","gute Arbeitsh\xF6he","hochreichend","\xDCberentwicklung"]};function le(e,t,n){let r=_(Math.min(5,Math.max(0,t))),o=Math.min(5,Math.max(0,Math.round(r))),i=r-o,a=i<=-.2?"\u2212":i>=.2?"+":"";return{key:e,score:r,level:o,sub:a,display:`${o}${a}`,label:Vn[e][o],reasons:n}}function on(e,t,n,r){let o=[`Start: ${M(n.takeoffWindKmh)} km/h aus ${y(n.takeoffWindDir)}`],i=H(r.wind.takeoff,n.takeoffWindKmh),a=H(r.wind.takeoff,n.layerMaxWindKmh)-r.wind.layerOffset,u=H(r.wind.gustSpread,n.gustSpreadKmh)-r.wind.gustOffset;a>i&&o.push(`in der Flugschicht bis ${M(n.layerMaxWindKmh)} km/h`),u>i&&u>.5&&o.push(`B\xF6en bis ${M(n.gustKmh)} km/h`);let l=le("wind_comfort",Math.max(i,a,u,0),o),c=[],m=H(r.thermal.wStar,n.wStar);!t.isDay||n.swRad<30?(m=0,c.push("keine Sonneneinstrahlung")):(c.push(`w* ${n.wStar} m/s, Steigen ca. ${n.climbEstimate} m/s`),n.tiMin!==null&&c.push(`TI bis ${n.tiMin} K`),n.workingHeight<150?(m=Math.min(m,.5),c.push("Thermik reicht kaum \xFCber den Start")):n.workingHeight<400&&(m=Math.min(m,1.5),c.push(`nur ${n.workingHeight} m Thermik \xFCber dem Start`)));let p=H(r.thermal.cape,n.cape),b=n.cloudTopMsl!==null&&n.cloudBaseMsl!==null?n.cloudTopMsl-n.cloudBaseMsl:0,w=H(r.structure.cloudDepth,b),h=Math.max(p,w);t.isDay&&h>m&&(m=h,c.push(`\xDCberentwicklungspotenzial (CAPE ${n.cape} J/kg, Wolkendicke ${b} m)`));let g=le("thermic_character",m,c),f=[],S=[{s:H(r.shear.shear,n.shearPerKm),why:`Windscherung ${n.shearPerKm} m/s pro km`},{s:H(r.shear.gustSpread,n.gustSpreadKmh),why:`B\xF6en ${M(n.gustSpreadKmh)} km/h \xFCber Mittelwind`}];if(n.gustFactor!==null&&S.push({s:H(r.shear.gustFactor,n.gustFactor),why:`B\xF6enfaktor ${n.gustFactor}`}),n.wStar>=.8){let T=n.layerMeanWindKmh/A/n.wStar;S.push({s:H(r.shear.windToThermal,T),why:`Wind zerrei\xDFt die B\xE4rte (Wind/w* = ${_(T)})`}),S.push({s:H(r.shear.thermalTurbulence,n.wStar),why:"kr\xE4ftige Thermik selbst"})}S.sort((T,B)=>B.s-T.s);let D=S[0].s+r.shear.comboBonus*S.slice(1).filter(T=>T.s>=2).length;for(let T of S)T.s>=1&&f.push(T.why);n.windAboveKmh>=10&&Me(n.windAboveDir,n.takeoffWindDir)>=60&&(D+=.7,f.push(`Wind dar\xFCber aus ${y(n.windAboveDir)}, am Start aus ${y(n.takeoffWindDir)}`)),n.windAboveKmh>=10&&!I(n.windAboveDir,e.windSector)&&(D+=.5,f.push("H\xF6henwind kommt nicht aus Startrichtung (Lee m\xF6glich)")),f.length===0&&f.push("kaum Scherung, kaum B\xF6en");let K=le("shear_turbulence",D,f),$=[],N=H(r.structure.workingHeight,n.workingHeight);!t.isDay||n.swRad<30?(N=0,$.push("ohne Einstrahlung keine Thermik")):(n.cloudBaseMsl!==null?$.push(`Basis ${n.cloudBaseMsl} m (${n.cloudBaseMsl-e.elevation} m \xFCber Start)`):$.push(`Blauthermik bis ${n.thermalTopMsl} m (${n.workingHeight} m \xFCber Start)`),n.inversion&&$.push(`Inversion ab ${n.inversion.baseMsl} m (+${n.inversion.strengthK} K)`),h>N&&(N=h,$.push("hochreichende Konvektion m\xF6glich")),n.cloudHigh>=70&&$.push("mittlere/hohe Wolken d\xE4mpfen die Einstrahlung"));let O=le("structure_cap",N,$);return{wind_comfort:l,thermic_character:g,shear_turbulence:K,structure_cap:O}}function sn(e,t,n,r){let o=[],i=[],a=t.surface,u=r.rules;t.isDay||o.push({code:"night",text:"Nacht"}),a.weatherCode>=95&&o.push({code:"storm",text:"Gewitter vorhergesagt"}),(a.precip>=u.maxPrecip||a.weatherCode>=51&&a.weatherCode<95)&&o.push({code:"precip",text:a.precip>=.1?`Niederschlag (${_(a.precip)} mm/h)`:"leichter Niederschlag"}),a.weatherCode===45||a.weatherCode===48?o.push({code:"fog",text:"Nebel in der Vorhersage"}):a.visibility<u.minVisibility&&o.push({code:"fog",text:`Sicht nur ${_(a.visibility/1e3)} km`}),n.rhTakeoff>=u.fogRh&&o.push({code:"cloud",text:`Start vermutlich in Wolke/Nebel (rel. Feuchte ${n.rhTakeoff} %)`}),n.cloudBaseMsl!==null&&n.cloudBaseMsl<e.elevation+u.minBaseAboveTakeoff&&o.push({code:"lowbase",text:n.cloudBaseMsl<=e.elevation?`Basis ${n.cloudBaseMsl} m, also unter dem Start: Start zeitweise in der Wolke`:`Basis ${n.cloudBaseMsl} m, zu knapp \xFCber dem Start`}),n.takeoffWindKmh>e.maxWindKmh&&o.push({code:"wind",text:`Wind am Start ${M(n.takeoffWindKmh)} km/h (Grenze ${e.maxWindKmh} km/h)`}),n.gustKmh>e.maxWindKmh+u.gustMarginKmh&&o.push({code:"gust",text:`B\xF6en bis ${M(n.gustKmh)} km/h`});let l=e.needsHeadwind?u.minWindForDirectionLaneKmh:u.minWindForDirectionKmh;if(n.takeoffWindKmh>=l&&!I(n.takeoffWindDir,e.windSector)){let m=n.headwindKmh<0;o.push({code:"direction",text:`${m?"R\xFCckenwind":"Seitenwind"} am Start: ${M(n.takeoffWindKmh)} km/h aus ${y(n.takeoffWindDir)}`})}else-n.headwindKmh>=u.maxTailwindKmh?o.push({code:"direction",text:`R\xFCckenwind am Start: ${M(-n.headwindKmh)} km/h aus ${y(n.takeoffWindDir)}`}):n.takeoffWindKmh>=3&&!I(n.takeoffWindDir,e.windSector)&&i.push(`schwacher Wind aus ${y(n.takeoffWindDir)}, Start nur in Thermikabl\xF6sungen`);e.needsHeadwind&&t.isDay&&n.headwindKmh<u.laneMinHeadwindKmh&&I(n.takeoffWindDir,e.windSector)?i.push(`Start im Wald braucht klaren Gegenwind, vorhergesagt nur ${M(Math.max(0,n.headwindKmh))} km/h`):e.needsHeadwind&&t.isDay&&n.takeoffWindKmh<3&&i.push("Start im Wald braucht klaren Gegenwind, vorhergesagt ist fast Windstille");let c=Me(n.windAboveDir,e.facing);if(n.windAboveKmh>=u.leeMinKmh&&c>100?o.push({code:"lee",text:`Lee: Wind dar\xFCber ${M(n.windAboveKmh)} km/h aus ${y(n.windAboveDir)}, also von hinten`}):n.windAboveKmh>=u.leeMinKmh&&c>60&&i.push(`Wind dar\xFCber kommt schr\xE4g von der Seite (${y(n.windAboveDir)}, ${M(n.windAboveKmh)} km/h)`),e.operatingHours&&t.isDay){let{sunrise:m,sunset:p}=ee(e.lat,e.lon,t.time.slice(0,10)),b=Number(t.time.slice(11,13))+Number(t.time.slice(14,16))/60,{afterSunriseH:w,beforeSunsetH:h}=e.operatingHours;w!==void 0&&b<m+w&&o.push({code:"hours",text:`Flugbetrieb erst ab ${L(m+w)} Uhr (Auflage: ${w} h nach Sonnenaufgang)`}),h!==void 0&&b>p-h&&o.push({code:"hours",text:`letzter Start ${L(p-h)} Uhr (Auflage: ${h} h vor Sonnenuntergang)`})}for(let m of e.dangerRules){let p=m.level==="takeoff"?n.takeoffWindKmh:n.windAboveKmh,b=m.level==="takeoff"?n.takeoffWindDir:n.windAboveDir;p>=m.minKmh&&I(b,m.sector)&&o.push({code:"danger",text:m.reason})}if(t.isDay&&(n.layerMaxWindKmh>=n.takeoffWindKmh+12&&i.push(`oben deutlich windiger (bis ${M(n.layerMaxWindKmh)} km/h)`),n.cape>=300&&i.push(`Labile Luft (CAPE ${n.cape} J/kg), \xDCberentwicklung beobachten`),n.inversion&&n.inversion.baseMsl>=e.elevation-50&&n.inversion.baseMsl<e.elevation+300?i.push("Inversion knapp \xFCber dem Start"):n.inversion&&n.inversion.baseMsl<e.elevation-50&&i.push("Bodeninversion unter dem Start: kalte, stabile Luft im Tal"),a.precipProb!==null&&a.precipProb>=40&&i.push(`Schauerrisiko ${a.precipProb} %`),e.airspace&&n.workingHeight>0)){let m=n.cloudBaseMsl??n.thermalTopMsl;m>e.airspace.floorMsl&&i.push(`Thermik reicht bis ${m} m: ${e.airspace.note}`)}return{noGo:o,warnings:i}}function an(e,t,n){let r=e.wind_comfort.score,o=e.thermic_character.score,i=e.shear_turbulence.score,a=e.structure_cap.score,u=n.zones;if(t.length>0)return{zone:"no-go",label:"No-Go"};if(r>=u.noGoWind)return{zone:"no-go",label:"No-Go (zu viel Wind)"};if(i>=u.noGoShear)return{zone:"no-go",label:"No-Go (zu ruppig)"};if(a>=u.noGoStructure||o>=4.8)return{zone:"no-go",label:"No-Go (\xDCberentwicklung)"};let l=Math.max(r,i,o)>=3.5;return o>=u.xcThermal&&a>=u.xcStructure&&r<=u.xcMaxWind&&i<=u.xcMaxShear?{zone:"xc",label:l?"XC (sportlich)":"XC"}:o>=u.progressThermal||r>=u.progressWind||i>=u.progressShear?l?{zone:"progress",label:"Progress (sportlich)"}:o<1.5&&r>=u.progressWind?{zone:"progress",label:"Progress (Soaring im Wind)"}:o<1.5&&i>=u.progressShear?{zone:"progress",label:"Progress (unruhige Luft)"}:{zone:"progress",label:"Progress"}:o<.8?{zone:"chill",label:"Chill (Abgleiter)"}:{zone:"chill",label:"Chill"}}var U={wind_comfort:"Wind",thermic_character:"Thermik",shear_turbulence:"Scherung/Turbulenz",structure_cap:"Struktur/Deckel"},ne={chill:"Chill",progress:"Progress",xc:"XC"};function Un(e,t){let n=t.comfort_profile.min_required_scores_for_goal,r=[];for(let o of["chill","progress","xc"]){let i=n[o];i&&(i.thermic_character_min!==void 0&&e.thermic_character.score<i.thermic_character_min||i.wind_comfort_max!==void 0&&e.wind_comfort.score>i.wind_comfort_max||i.shear_turbulence_max!==void 0&&e.shear_turbulence.score>i.shear_turbulence_max||i.structure_cap_min!==void 0&&e.structure_cap.score<i.structure_cap_min||r.push(o))}return r}function ye(e,t,n,r){let o=Un(e,r);if(n.length>0||t==="no-go")return{score:0,label:"No-Go",exceed:{},goalsMet:[],notes:[]};let i=r.comfort_profile.tolerance,a={},u=[],l=0;for(let b of Object.keys(e)){let w=i[b];if(!w)continue;let h=e[b].score-w.max_score_acceptable;h>0&&(a[b]=Math.round(h*10)/10,l+=h*w.importance_weight,u.push(`${U[b]} ${e[b].display} liegt \xFCber deiner Grenze ${w.max_score_acceptable}`))}let c=100-35*l,m=r.comfort_profile.pilot_profile;o.includes(m)||(c-=25,u.push(`f\xFCr dein Ziel ${ne[m]} reicht es nicht`)),c=Math.max(0,Math.min(100,Math.round(c)));let p=c>=80?"passt":c>=60?"passt eingeschr\xE4nkt":c>=40?"grenzwertig":"nicht f\xFCr dich";return{score:c,label:p,exceed:a,goalsMet:o,notes:u}}var ln=["no-go","chill","progress","xc"],ze={"no-go":"No-Go",chill:"Chill",progress:"Progress",xc:"XC"},Zn={night:"Nacht",storm:"Gewitter",precip:"Niederschlag",fog:"Nebel oder schlechte Sicht",cloud:"Start in Wolke/Nebel",lowbase:"Basis zu tief",wind:"zu viel Wind am Start",gust:"starke B\xF6en",direction:"Wind aus falscher Richtung am Start",danger:"gef\xE4hrliche Windrichtung f\xFCr dieses Gel\xE4nde",zone:"zu heftige Bedingungen",lee:"Lee (H\xF6henwind von hinten)",hours:"au\xDFerhalb der erlaubten Flugzeit"};function ce(e){return Number(e.slice(11,13))}function cn(e){return`${String(e).padStart(2,"0")}:00`}function jn(e){let t=new Map;for(let r of e)t.set(r.zone,(t.get(r.zone)??0)+1);let n=e[0].zone;for(let[r,o]of t){let i=t.get(n)??0;(o>i||o===i&&ln.indexOf(r)>ln.indexOf(n))&&(n=r)}return n}function un(e){let t=["wind_comfort","thermic_character","shear_turbulence","structure_cap"],n={};for(let r of t)n[r]=Math.round(e.reduce((o,i)=>o+i.dimensions[r].score,0)/e.length*10)/10;return{start:cn(ce(e[0].time)),end:cn(ce(e[e.length-1].time)+1),hours:e.length,zone:jn(e),fitMax:Math.max(...e.map(r=>r.fit.score)),fitMean:Math.round(e.reduce((r,o)=>r+o.fit.score,0)/e.length),dims:n}}function De(e,t){let n=new Map;for(let o of e){let i=o.time.slice(0,10);n.has(i)||n.set(i,[]),n.get(i).push(o)}let r=[];for(let[o,i]of n){let a=i.filter(h=>h.isDay),u=[],l=[];for(let h of a){let g=h.zone!=="no-go"&&h.fit.score>=t.windowMinFit,f=l.length===0||ce(h.time)===ce(l[l.length-1].time)+1;g&&f?l.push(h):(l.length>0&&u.push(un(l)),l=g?[h]:[])}l.length>0&&u.push(un(l));let c=new Map;for(let h of a){let g=new Set(h.noGo.map(f=>f.code));g.size===0&&h.zone==="no-go"&&g.add("zone");for(let f of g)c.set(f,(c.get(f)??0)+1)}let m=[...c.entries()].filter(([h])=>h!=="night").sort((h,g)=>g[1]-h[1]).map(([h,g])=>({reason:Zn[h]??h,hours:g})),p=a.filter(h=>h.zone!=="no-go"),b=p.length===0?null:p.reduce((h,g)=>g.fit.score>h.fit.score||g.fit.score===h.fit.score&&g.dimensions.thermic_character.score>h.dimensions.thermic_character.score?g:h),w;if(u.length>0)w=u.map(h=>`${h.start.slice(0,2)}\u2013${h.end.slice(0,2)} Uhr ${ze[h.zone]} (Passung bis ${h.fitMax})`).join(", ");else if(b)w=`kein Fenster f\xFCr dich, beste Stunde ${b.time.slice(11,13)} Uhr: ${b.zoneLabel}, ${b.fit.label}`;else{let h=m.slice(0,2).map(g=>g.reason);w=h.length>0?`nicht fliegbar: ${h.join(", ")}`:"nicht fliegbar"}r.push({date:o,windows:u,bestHour:b,noGoReasons:m,verdict:w})}return r}function qn(e,t,n,r=V){let o=rn(e,t,r),i=on(e,t,o,r),{noGo:a,warnings:u}=sn(e,t,o,r),{zone:l,label:c}=an(i,a,r),m=ye(i,l,a,n);return{time:t.time,isDay:t.isDay,metrics:o,dimensions:i,noGo:a,warnings:u,zone:l,zoneLabel:c,fit:m,summary:Yn(e,o,i,a,c)}}function Yn(e,t,n,r,o){if(r.length>0)return`${o}: ${r.map(a=>a.text).join("; ")}`;let i=[];return i.push(`Thermik ${n.thermic_character.label}`),t.wStar>0&&i.push(`Steigen ca. ${t.climbEstimate} m/s`),t.cloudBaseMsl!==null?i.push(`Basis ${t.cloudBaseMsl} m`):t.workingHeight>0&&i.push(`Thermik bis ${t.thermalTopMsl} m`),i.push(`Wind ${Math.round(t.takeoffWindKmh)} km/h aus ${y(t.takeoffWindDir)}`),i.push(n.shear_turbulence.label),`${o}: ${i.join(", ")}`}function dn(e,t,n,r=V){let o=t.hours.map(i=>qn(e,i,n,r));return{spot:e,source:t.source,model:t.model,fetchedAt:t.fetchedAt,modelElevation:t.modelElevation,hours:o,days:De(o,r)}}function hn(e,t,n=V){let r=e.hours.map(o=>({...o,fit:ye(o.dimensions,o.zone,o.noGo,t)}));return{...e,hours:r,days:De(r,n)}}var vn="flugwetter.profil.v1",Mn="flugwetter.vorhersage.v1",kn="flugwetter.region.v1",Jn=60,We=["wind_comfort","thermic_character","shear_turbulence","structure_cap"],Xn={wind_comfort:"Wind",thermic_character:"Thermik",shear_turbulence:"Scherung",structure_cap:"Deckel"},_n=[{id:"alle",label:"Alle",region:""},{id:"nord",label:"Nord",region:"Nordschwarzwald"},{id:"mitte",label:"Mitte",region:"Mittlerer Schwarzwald"},{id:"sued",label:"S\xFCd",region:"S\xFCdschwarzwald"}],Qn={chill:"ruhig gleiten, wenig Thermik",progress:"nutzbare Thermik zum \xDCben",xc:"kr\xE4ftige Thermik f\xFCr Strecke"},et={wind_comfort:"0 windstill, 2 m\xE4\xDFig (um 10 km/h), 4 kr\xE4ftig (\xFCber 20 km/h)",thermic_character:"1 schwach und flach, 3 gut nutzbar, 4 kr\xE4ftig und sportlich",shear_turbulence:"1 ruhig, 3 bewegt, 4 ruppig",structure_cap:"1 flach gedeckelt, 3 gute Arbeitsh\xF6he, 4 hochreichend"},d={view:"fenster",spotId:"",day:"",region:Le(kn)??"alle",pilot:rt(),mode:null,fetchedAt:"",liveProblem:"",base:[],evals:[],loading:"Lade Vorhersage \u2026",error:""},j=!1;document.addEventListener("securitypolicyviolation",e=>{if(!e.blockedURI.includes("open-meteo"))return;j=!0;let t=document.getElementById("refresh");t&&(t.hidden=!0),d.view==="info"?G():Oe()});var nt=window.matchMedia?.("(display-mode: standalone)").matches===!0||navigator.standalone===!0,$e=(e,t)=>s("a",{href:e,target:"_blank",rel:"noopener"},t);function tt(e){let t=e instanceof Error?e.message:String(e);return e instanceof TypeError&&/fetch|load failed|network/i.test(t)?"keine Verbindung zu Open-Meteo":/limit/i.test(t)?"Abruflimit von Open-Meteo erreicht":t==="Zeit\xFCberschreitung"?"Open-Meteo antwortet zu langsam":t}function Le(e){try{return localStorage.getItem(e)}catch{return null}}function Re(e,t){try{localStorage.setItem(e,t)}catch{}}function yn(e){return JSON.parse(JSON.stringify(e))}function rt(){let e=Le(vn);if(e)try{let t=JSON.parse(e);if(t?.comfort_profile?.tolerance&&t.comfort_profile.min_required_scores_for_goal)return t}catch{}return yn(R)}function He(){Re(vn,JSON.stringify(d.pilot))}function mn(){let e=Le(Mn);if(!e)return null;try{let t=JSON.parse(e);return t.fetched_at&&t.spots?t:null}catch{return null}}var it=new Intl.DateTimeFormat("de-DE",{timeZone:"Europe/Berlin",year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hourCycle:"h23"});function ie(e){let t=Object.fromEntries(it.formatToParts(e).map(n=>[n.type,n.value]));return{date:`${t.year}-${t.month}-${t.day}`,hour:Number(t.hour),text:`${t.day}.${t.month}., ${t.hour}:${t.minute} Uhr`}}var ot=["So","Mo","Di","Mi","Do","Fr","Sa"],st=["Sonntag","Montag","Dienstag","Mittwoch","Donnerstag","Freitag","Samstag"];function zn(e,t){let n=new Date(`${e}T12:00:00Z`);return n.setUTCDate(n.getUTCDate()+t),n.toISOString().slice(0,10)}function Ke(e,t=!1){let n=ie(new Date).date;if(e===n)return"Heute";if(e===zn(n,1))return"Morgen";let r=new Date(`${e}T12:00:00Z`).getUTCDay();return t?st[r]:ot[r]}function Ae(e){return`${e.slice(8,10)}.${e.slice(5,7)}.`}function Ge(e){let t=ie(new Date),n=e.slice(0,10);return n<t.date||n===t.date&&Number(e.slice(11,13))<t.hour}function Dn(e){return(Date.now()-new Date(e).getTime())/6e4}function fn(e,t){return new Promise((n,r)=>{let o=setTimeout(()=>r(new Error("Zeit\xFCberschreitung")),t);e.then(i=>{clearTimeout(o),n(i)},i=>{clearTimeout(o),r(i)})})}async function at(e){let t=await fn(fetch(_e(se[0],{forecastDays:1},["temperature_2m"])),6e3);if(!t.ok){let a=await t.text().catch(()=>"");throw new Error(/limit/i.test(a)?"Abruflimit erreicht":`Antwort ${t.status}`)}let n={},r=[...se],o=0,i=async()=>{for(let a=r.shift();a;a=r.shift())n[a.id]=await fn(tn(a),6e4),e(++o)};return await Promise.all([i(),i(),i()]),{fetched_at:new Date().toISOString(),spots:n}}var lt=()=>new Promise(e=>setTimeout(e,30));async function pn(e){if(d.error="",!e){let n=mn();if(n&&Dn(n.fetched_at)<Jn){await ue(n,"cache");return}}he("Hole Vorhersage bei Open-Meteo \u2026");try{let n=await at(r=>he(`Hole Vorhersage bei Open-Meteo \u2026 ${r} von ${se.length} Gel\xE4nden`));Re(Mn,JSON.stringify(n)),d.liveProblem="",await ue(n,"live");return}catch(n){d.liveProblem=tt(n)}let t=mn();if(t){await ue(t,"cache");return}try{he("Lade mitgelieferten Datenstand \u2026");let n=await fetch("data/forecast.json");if(!n.ok)throw new Error(`Antwort ${n.status}`);await ue(await n.json(),"snapshot")}catch{d.loading="",d.error="Keine Vorhersage verf\xFCgbar: Open-Meteo ist gerade nicht erreichbar und es gibt keinen gespeicherten Stand. Pr\xFCfe die Internetverbindung und tippe dann auf \u201EAktualisieren\u201C.",G()}}async function ue(e,t){he("Bewerte die Startpl\xE4tze \u2026"),await lt();let n=[];for(let o of Y){let i=e.spots[o.site.id];i&&n.push(dn(o,nn(i,{fetchedAt:e.fetched_at}),d.pilot))}d.base=n,d.evals=n,d.mode=t,d.fetchedAt=e.fetched_at,d.loading="";let r=Ne();r.includes(d.day)||(d.day=ct(r)),G()}function he(e){d.loading=e,Oe()}function Pe(){d.evals=d.base.map(e=>hn(e,d.pilot))}function Ne(){let e=ie(new Date),t=[...new Set(d.evals.flatMap(r=>r.days.map(o=>o.date)))].sort(),n=t.filter(r=>d.evals.some(o=>o.hours.some(i=>i.isDay&&i.time.startsWith(r)&&!Ge(i.time))));return n.length>0?n:t.filter(r=>r<=zn(e.date,10))}function ct(e){return e.find(t=>d.evals.some(n=>n.days.find(r=>r.date===t)?.windows.length))??e[0]??""}function $n(){let e=_n.find(t=>t.id===d.region);return!e||!e.region?d.evals:d.evals.filter(t=>t.spot.site.region===e.region)}function re(e,t){return e.days.find(n=>n.date===t)}function te(e){return e.windows.length>0?Math.max(...e.windows.map(t=>t.fitMax)):e.bestHour?.fit.score??0}function gn(e){return e.windows.reduce((t,n)=>t+n.hours,0)}function s(e,t={},...n){let r=document.createElement(e);for(let[o,i]of Object.entries(t))i==null||i===!1||(o==="class"?r.className=String(i):o.startsWith("on")&&typeof i=="function"?r.addEventListener(o.slice(2),i):r.setAttribute(o,i===!0?"":String(i)));for(let o of n.flat())o==null||o===!1||r.append(o instanceof Node?o:String(o));return r}var F=e=>e.toLocaleString("de-DE",{maximumFractionDigits:1}),Te=e=>`${Math.round(e)} km/h`;function Z(e,t){return s("span",{class:`pill z-${e}`},t)}function ut(e){return`${e.start.slice(0,2)}\u2013${e.end.slice(0,2)} Uhr \xB7 ${ze[e.zone]}`}function dt(e,t){let n=e.hours.filter(i=>i.isDay&&i.time.startsWith(t));if(n.length===0)return s("div");let r=V.windowMinFit,o=n.map(i=>{let a=i.zone!=="no-go"&&i.fit.score<r,u=[`z-${i.zone}`,a?"weak":"",Ge(i.time)?"past":""].filter(Boolean).join(" "),l=`${i.time.slice(11,16)} ${i.zoneLabel}${i.zone==="no-go"?"":`, Passung ${i.fit.score}`}`;return s("span",{class:u,title:l})});return s("div",{class:"strip","aria-hidden":"true"},s("div",{class:"bars"},o),s("div",{class:"ticks"},s("span",{},n[0].time.slice(11,13)),s("span",{},String(Number(n[n.length-1].time.slice(11,13))+1))))}function Oe(){let e=document.getElementById("status");if(!e)return;if(e.className="status",e.replaceChildren(),d.loading){e.append(d.loading);return}if(d.error||!d.mode){e.append(s("strong",{},"Keine Daten")),e.classList.add("warn");return}let t=ie(new Date(d.fetchedAt)).text,n=Dn(d.fetchedAt);if(d.mode==="live")e.append(s("strong",{},"Live"),` \xB7 Vorhersage von ${t}, ICON (DWD) \xFCber Open-Meteo`);else if(d.mode==="cache")e.append(s("strong",{},"Gespeichert"),` \xB7 Vorhersage von ${t}`),d.liveProblem&&!j&&e.append(`. Aktualisieren gerade nicht m\xF6glich: ${d.liveProblem}.`),n>180&&e.classList.add("warn");else{e.classList.add("warn");let r=j||!d.liveProblem?"Hier gibt es keinen Live-Abruf, die Daten sind fest mitgeliefert.":`Live-Abruf gerade nicht m\xF6glich (${d.liveProblem}), deshalb dieser mitgelieferte Stand.`;e.append(s("strong",{},"Beispielstand"),` vom ${t}. ${r}`)}}function ht(){for(let e of["fenster","profil","info"]){let t=document.getElementById(`tab-${e}`);if(!t)continue;d.view===e||e==="fenster"&&d.view==="detail"?t.setAttribute("aria-current","page"):t.removeAttribute("aria-current")}}function Tn(e,t){let n=Ne();return s("div",{class:"days",role:"group","aria-label":"Tag w\xE4hlen"},n.map(r=>{let i=(t?[t]:$n()).filter(c=>(re(c,r)?.windows.length??0)>0),a=i.flatMap(c=>re(c,r).windows),u=[...a].sort((c,m)=>m.fitMax-c.fitMax)[0],l;if(t){let c=re(t,r);l=a.length>0?a.map(m=>`${m.start.slice(0,2)}\u2013${m.end.slice(0,2)}`).join(", "):c?.bestHour?"nur knapp":"nicht fliegbar"}else l=i.length>0?`${i.length} mit Fenster`:"kein Fenster";return s("button",{class:"day",type:"button","aria-pressed":String(r===d.day),onclick:()=>e(r)},s("span",{class:"d1"},`${Ke(r)} ${Ae(r)}`),s("span",{class:"d2"},l),s("span",{class:"dots"},u?s("i",{class:`z-${u.zone}`}):s("i")))}))}function mt(){return s("div",{class:"filters",role:"group","aria-label":"Region"},_n.map(e=>s("button",{class:"chip",type:"button","aria-pressed":String(d.region===e.id),onclick:()=>{d.region=e.id,Re(kn,e.id),G()}},e.label)))}function bn(e,t){let n=e.spot,r=te(t),o=t.windows.length>0?t.windows.map(i=>Z(i.zone,ut(i))):t.bestHour?[s("span",{class:"small"},`Beste Stunde ${t.bestHour.time.slice(11,13)} Uhr: ${t.bestHour.zoneLabel}, ${t.bestHour.fit.label}`)]:[];return s("button",{class:"card",type:"button",onclick:()=>En(n.id)},s("span",{class:"row1"},s("span",{class:"name"},n.name),s("span",{class:"fit",title:"beste pers\xF6nliche Passung (0 bis 100)"},String(r),s("small",{},"/100"))),s("span",{class:"meta"},`${n.site.name} \xB7 ${n.elevation} m \xB7 Start nach ${y(n.facing)}`),s("span",{class:"wins"},o),dt(e,t.date))}function ft(e){let t=d.day,n=$n().map(l=>({ev:l,day:re(l,t)})).filter(l=>!!l.day),r=n.filter(l=>l.day.windows.length>0).sort((l,c)=>te(c.day)-te(l.day)||gn(c.day)-gn(l.day)),o=n.filter(l=>l.day.windows.length===0&&l.day.bestHour).sort((l,c)=>te(c.day)-te(l.day)),i=n.filter(l=>l.day.windows.length===0&&!l.day.bestHour),a=n[0]?.ev.spot??Y[0],u=t?ee(a.lat,a.lon,t):null;e.append(Tn(l=>{d.day=l,G()}),mt(),s("div",{class:"dayhead"},s("h2",{},t?`${Ke(t,!0)}, ${Ae(t)}`:"Kein Tag"),s("p",{},`${r.length} von ${n.length} Startpl\xE4tzen mit Flugfenster f\xFCr dein Profil (${ne[d.pilot.comfort_profile.pilot_profile]})`+(u?` \xB7 Sonne ${L(u.sunrise)} bis ${L(u.sunset)} Uhr`:"")))),r.length>0?e.append(s("section",{class:"group"},s("h3",{},"Passt zu dir"),r.map(l=>bn(l.ev,l.day)))):e.append(s("p",{class:"empty"},"An diesem Tag passt kein Startplatz zu deinem Profil. Weiter unten steht, was fliegbar w\xE4re und was dagegen spricht.")),o.length>0&&e.append(s("section",{class:"group"},s("h3",{},"Fliegbar, aber nicht dein Ziel"),o.map(l=>bn(l.ev,l.day)))),i.length>0&&e.append(s("section",{class:"group"},s("h3",{},"Nicht fliegbar"),s("div",{class:"nogo-list"},i.map(l=>s("button",{type:"button",onclick:()=>En(l.ev.spot.id)},s("span",{class:"n"},l.ev.spot.name),s("span",{class:"r"},l.day.noGoReasons.slice(0,2).map(c=>c.reason).join(", ")||"nicht fliegbar"))))))}function En(e){location.hash=e}function pt(e,t){let n=t.dimensions[e],r=d.pilot.comfort_profile.tolerance[e]?.max_score_acceptable,o=r!==void 0&&n.score>r;return s("div",{class:"dim",title:`${U[e]}: ${n.label}`},s("span",{class:"dl"},s("span",{},Xn[e]),s("b",{},n.display)),s("span",{class:"bar"},s("span",{class:o?"over":"",style:`width:${n.score/5*100}%`}),r!==void 0?s("i",{style:`left:calc(${r/5*100}% - 1px)`,title:`deine Grenze ${F(r)}`}):null))}function gt(e){let t=e.metrics,n=[`Start ${Te(t.takeoffWindKmh)} aus ${y(t.takeoffWindDir)}`,`dar\xFCber ${Te(t.windAboveKmh)} aus ${y(t.windAboveDir)}`];return t.wStar>.3&&n.push(t.climbEstimate>=.2?`Steigen ca. ${F(t.climbEstimate)} m/s`:"kaum nutzbares Steigen"),t.workingHeight>0&&n.push(t.cloudBaseMsl!==null?`Basis ${t.cloudBaseMsl} m`:`Thermik bis ${t.thermalTopMsl} m`),t.inversion&&n.push(`Inversion ${t.inversion.baseMsl} m`),n.push(`B\xF6en ${Te(t.gustKmh)}`),n.join(" \xB7 ")}function bt(e){let t=[];for(let n of e.noGo)t.push(s("li",{class:"nogo"},n.text));if(e.zone==="no-go"&&e.noGo.length===0)for(let n of Object.values(e.dimensions).filter(r=>r.score>=4.5))t.push(s("li",{class:"nogo"},`${U[n.key]}: ${n.reasons.join(", ")}`));if(e.zone!=="no-go")for(let n of e.fit.notes)t.push(s("li",{class:"info"},n));for(let n of e.warnings)t.push(s("li",{class:"warn"},n));return s("article",{class:`hour${Ge(e.time)?" past":""}`},s("div",{class:"h1"},s("time",{datetime:e.time},e.time.slice(11,16)),Z(e.zone,e.zoneLabel),s("span",{class:"fitline"},e.zone==="no-go"?"":s("span",{},s("b",{},String(e.fit.score)),` ${e.fit.label}`))),s("div",{class:"dims"},We.map(n=>pt(n,e))),s("p",{class:"keydata"},gt(e)),t.length>0?s("ul",{class:"notes"},t):null,s("details",{class:"why"},s("summary",{},"Begr\xFCndung der Stufen"),s("ul",{},We.map(n=>{let r=e.dimensions[n];return s("li",{},`${U[n]} ${r.display} (${r.label}): ${r.reasons.join(", ")||"keine Besonderheit"}`)}))))}function C(e,t){return s("div",{},s("dt",{},e),s("dd",{},t))}function wt(e){let t=d.evals.find(l=>l.spot.id===d.spotId);if(!t){e.append(s("p",{class:"empty"},"Diesen Startplatz gibt es nicht."));return}let n=t.spot,r=d.day,o=re(t,r),i=r?ee(n.lat,n.lon,r):null,a=[C("Start",`${n.elevation} m, nach ${y(n.facing)}`),C("Windfenster",`${y(n.windSector.from)}\u2013${y(n.windSector.to)} (${n.windSector.from}\u2013${n.windSector.to}\xB0)`),C("Wind h\xF6chstens",`${n.maxWindKmh} km/h`)];if(n.landing&&a.push(C("Landeplatz",`${n.landing.name}, ${n.landing.elevation} m`)),n.needsHeadwind&&a.push(C("Start im Wald","braucht klaren Gegenwind")),n.operatingHours&&i){let l=n.operatingHours.afterSunriseH!==void 0?L(i.sunrise+n.operatingHours.afterSunriseH):L(i.sunrise),c=n.operatingHours.beforeSunsetH!==void 0?L(i.sunset-n.operatingHours.beforeSunsetH):L(i.sunset);a.push(C("Flugzeit laut Auflage",`${l} bis ${c} Uhr`))}if(n.airspace&&a.push(C("Luftraum",`D Basel ab ${n.airspace.floorMsl} m`)),e.append(s("button",{class:"back",type:"button",onclick:()=>location.hash="fenster"},"\u2039 Alle Startpl\xE4tze"),s("div",{class:"spothead"},s("h2",{},n.name),s("p",{},`${n.site.name} \xB7 ${n.site.region} \xB7 ${n.site.club}`)),s("dl",{class:"facts"},a),Tn(l=>{d.day=l,G()},t)),!o){e.append(s("p",{class:"empty"},"F\xFCr diesen Tag gibt es keine Vorhersage."));return}e.append(s("div",{class:"dayhead"},s("h2",{},`${Ke(r,!0)}, ${Ae(r)}`),s("p",{class:"verdict"},o.verdict),i?s("p",{class:"sun"},`Sonnenaufgang ${L(i.sunrise)} \xB7 Sonnenuntergang ${L(i.sunset)} Uhr`):null),s("div",{class:"hours"},t.hours.filter(l=>l.isDay&&l.time.startsWith(r)).map(bt)));let u=[...n.notes];n.airspace&&u.push(`${n.airspace.note}.`),e.append(s("section",{class:"box"},s("h3",{},"Gut zu wissen"),s("ul",{},u.map(l=>s("li",{},l))),s("p",{class:"small"},"Quellen: ",s("a",{href:`https://service.dhv.de/db2/details.php?qi=glp_details&item=${n.site.dhvItem}`,target:"_blank",rel:"noopener"},"DHV-Gel\xE4ndedatenbank"),n.site.url?" \xB7 ":"",n.site.url?s("a",{href:n.site.url,target:"_blank",rel:"noopener"},"Vereinsseite"):"",` \xB7 Das Wettermodell rechnet hier mit ${t.modelElevation} m Gel\xE4ndeh\xF6he.`)))}var wn;function xn(){let e=Ne(),t=0,n=new Set;for(let r of d.evals)for(let o of r.days)e.includes(o.date)&&(t+=o.windows.length,o.windows.length>0&&n.add(r.spot.id));return e.length===0?"Noch keine Vorhersage geladen.":`Mit diesem Profil: ${t} Flugfenster an ${n.size} von ${d.evals.length} Startpl\xE4tzen in den n\xE4chsten ${e.length} Tagen.`}function de(e){He(),clearTimeout(wn),wn=setTimeout(()=>{Pe(),e.textContent=xn()},120)}function Ee(e){let t=s("output",{for:e.id},e.format(e.value)),n=s("input",{type:"range",id:e.id,min:e.min,max:e.max,step:e.step,value:e.value,disabled:e.disabled,oninput:r=>{let o=Number(r.target.value);t.textContent=e.format(o),e.onChange(o)}});return s("div",{class:"slider"},s("label",{for:e.id},s("span",{},e.label),t),n,e.hint?s("span",{class:"hint"},e.hint):null)}var St=e=>e===0?"egal":e<.8?`niedrig (${F(e)})`:e<=1.2?`normal (${F(e)})`:`hoch (${F(e)})`,xe={thermic_character_min:"Thermik mindestens",structure_cap_min:"Deckel mindestens",wind_comfort_max:"Wind h\xF6chstens",shear_turbulence_max:"Scherung h\xF6chstens"},vt={thermic_character_min:2,structure_cap_min:2,wind_comfort_max:3,shear_turbulence_max:3};function Mt(e){var l;let t=d.pilot.comfort_profile,n=s("p",{class:"summary",role:"status"},xn()),r=s("div",{class:"seg",role:"group","aria-label":"Ziel"},["chill","progress","xc"].map(c=>s("button",{type:"button","aria-pressed":String(t.pilot_profile===c),onclick:()=>{t.pilot_profile=c,He(),Pe(),G()}},s("b",{},ne[c]),s("span",{},Qn[c])))),o=We.map(c=>{let m=t.tolerance[c];return s("div",{class:"dimset"},s("h4",{},U[c]),Ee({id:`tol-${c}`,label:"H\xF6chstens bis Stufe",hint:et[c],min:0,max:5,step:.5,value:m.max_score_acceptable,format:F,onChange:p=>{m.max_score_acceptable=p,de(n)}}),Ee({id:`w-${c}`,label:"Wie wichtig dir das ist",min:0,max:2,step:.1,value:m.importance_weight,format:St,onChange:p=>{m.importance_weight=p,de(n)}}))}),i=t.pilot_profile,a=(l=t.min_required_scores_for_goal)[i]??(l[i]={}),u=Object.keys(xe).map(c=>{let m=a[c]!==void 0,p=a[c]??vt[c],b,w=s("input",{type:"checkbox",id:`req-on-${c}`,checked:m,"aria-label":`${xe[c]} pr\xFCfen`,onchange:h=>{let g=h.target.checked;g?a[c]=Number(b.querySelector("input").value):delete a[c],b.querySelector("input").disabled=!g,de(n)}});return b=Ee({id:`req-${c}`,label:xe[c],min:0,max:5,step:.5,value:p,format:F,disabled:!m,onChange:h=>{a[c]!==void 0&&(a[c]=h,de(n))}}),[w,b]});e.append(s("section",{class:"box"},s("h3",{},"Dein Ziel"),r,n),s("section",{class:"box"},s("h3",{},"Was du dir zumutest"),s("p",{class:"small"},"Liegt eine Stufe \xFCber deiner Grenze, sinkt die Passung, je wichtiger dir die Dimension ist, desto st\xE4rker. Die Grenze siehst du in der Stundenansicht als Strich auf dem Balken."),o),s("section",{class:"box"},s("h3",{},`Was ${ne[i]} mindestens braucht`),s("p",{class:"small"},"Reicht eine Stunde daf\xFCr nicht, kostet das 25 Punkte Passung. Haken weg hei\xDFt: wird nicht gepr\xFCft."),s("div",{class:"req"},u.flat())),s("section",{class:"box"},s("p",{class:"small"},"Dein Profil wird nur auf diesem Ger\xE4t gespeichert. Der Standard entspricht deiner user_konfig."),s("button",{class:"btn",type:"button",onclick:()=>{d.pilot=yn(R),He(),Pe(),G()}},"Auf Standard zur\xFCcksetzen")))}function kt(e){let t=s("div",{class:"legend"},Z("chill","Chill"),Z("progress","Progress"),Z("xc","XC"),Z("no-go","No-Go")),n=d.mode!=="snapshot"?"Dein Handy holt die Vorhersage selbst bei Open-Meteo, je Gel\xE4nde in drei Teilen. Ein Abruf bleibt eine Stunde lang auf dem Ger\xE4t gespeichert.":j?"In dieser Vorschau sind die Daten ein fester Stand aus Open-Meteo. L\xE4uft die App auf einem normalen Webserver, holt dein Handy die Vorhersage selbst.":"Gerade siehst du den mitgelieferten Datenstand, weil der Live-Abruf nicht geklappt hat. Tippe sp\xE4ter auf \u201EAktualisieren\u201C.",r=j||nt?null:s("section",{class:"box"},s("h3",{},"Als App auf dem Handy"),s("ul",{},s("li",{},"iPhone (Safari): Teilen-Symbol antippen, dann \u201EZum Home-Bildschirm\u201C."),s("li",{},"Android (Chrome): Men\xFC \u22EE antippen, dann \u201EZum Startbildschirm hinzuf\xFCgen\u201C oder \u201EApp installieren\u201C.")),s("p",{class:"small"},"Dann startet Flugwetter wie eine normale App. Dein Profil und die letzte Vorhersage bleiben auf dem Handy gespeichert."));r&&e.append(r),e.append(s("section",{class:"box"},s("h3",{},"Woher die Daten kommen"),s("p",{},`Wettermodell ICON des Deutschen Wetterdienstes (ICON-D2 mit etwa 2 km f\xFCr die ersten zwei Tage, danach ICON-EU), abgerufen \xFCber Open-Meteo. ${n}`),d.fetchedAt?s("p",{class:"small"},`Stand der Vorhersage: ${ie(new Date(d.fetchedAt)).text}.`):null,d.liveProblem&&d.mode!=="live"?s("p",{class:"small"},j?"In der Claude-Vorschau sind Abrufe an fremde Server gesperrt.":`Letzter Live-Versuch: ${d.liveProblem}.`):null,s("p",{class:"small"},"Wetterdaten: ",$e("https://open-meteo.com/","Open-Meteo.com")," (",$e("https://creativecommons.org/licenses/by/4.0/","CC BY 4.0"),"), Modell ICON des ",$e("https://www.dwd.de/","Deutschen Wetterdienstes"),". Gel\xE4ndedaten: DHV-Gel\xE4ndedatenbank und die Websites der Vereine.")),s("section",{class:"box"},s("h3",{},"Zonen"),t,s("ul",{},s("li",{},"Chill: ruhige Luft, schwache oder keine Thermik, gut f\xFCr Gleitfl\xFCge."),s("li",{},"Progress: nutzbare Thermik oder Soaring-Wind, auch etwas bewegtere Luft."),s("li",{},"XC: kr\xE4ftige Thermik und genug Arbeitsh\xF6he f\xFCr Strecke."),s("li",{},"No-Go: Nacht, Niederschlag, Nebel, Start in der Wolke, zu viel Wind oder B\xF6en, falsche Windrichtung, Lee, Auflagen des Gel\xE4ndes oder zu heftige Bedingungen."))),s("section",{class:"box"},s("h3",{},"Die vier Dimensionen (0 bis 5)"),s("ul",{},s("li",{},"Wind: Wind in Starth\xF6he. 1 = 5 km/h, 2 = 10, 3 = 15, 4 = 22, 5 = ab 30 km/h. Mehr Wind oben oder kr\xE4ftige B\xF6en heben die Stufe."),s("li",{},"Thermik: aus Einstrahlung und H\xF6he der Thermikschicht. 1 schwach und flach, 3 gut nutzbar, 4 kr\xE4ftig, 5 \xDCberentwicklung."),s("li",{},"Scherung: Windscherung, B\xF6en, Wind im Verh\xE4ltnis zur Thermik, Lee. 1 ruhig, 3 bewegt, 4 ruppig."),s("li",{},"Deckel: nutzbare H\xF6he \xFCber dem Start bis Thermikobergrenze oder Basis. 1 etwa 350 m, 2 700 m, 3 1200 m, 4 \xFCber 2000 m.")),s("p",{class:"small"},"Unterstufen: \u201E2\u2212\u201C ist knapp unter 2, \u201E2+\u201C knapp dar\xFCber. Passung: 100 minus Abz\xFCge, wenn eine Dimension \xFCber deiner Grenze liegt, und minus 25, wenn es f\xFCr dein Ziel nicht reicht. Ab 60 z\xE4hlt eine Stunde zum Flugfenster.")),s("section",{class:"box"},s("h3",{},"Grenzen des Prototyps"),s("ul",{},s("li",{},"Die Schwellen sind Startwerte und noch nicht an echten Fl\xFCgen geeicht. Das kommt mit dem Flug-Feedback in Schritt 3."),s("li",{},"Das Modellgel\xE4nde ist gegl\xE4ttet. D\xFCsen, Talwind und lokale Effekte fehlen, am Merkur ist der Wind oft st\xE4rker als vorhergesagt."),s("li",{},"Bei Windstille gelten alle Startrichtungen eines Bergs als m\xF6glich. Welcher Hang Sonne hat, ist noch nicht eingerechnet."),s("li",{},"Die App ersetzt nicht den Blick auf Stationen, Webcams und die Lage vor Ort."))))}function Sn(){let e=decodeURIComponent(location.hash.slice(1));e==="profil"||e==="info"?d.view=e:Y.some(t=>t.id===e)?(d.view="detail",d.spotId=e):d.view="fenster"}function G(){Oe(),ht();let e=document.getElementById("view");if(e){if(e.replaceChildren(),d.error){e.append(s("p",{class:"empty"},d.error));return}if(d.view==="profil"){Mt(e);return}if(d.view==="info"){kt(e);return}if(d.evals.length===0){e.append(s("p",{class:"empty"},d.loading||"Lade Vorhersage \u2026"));return}d.view==="detail"?wt(e):ft(e)}}function _t(){Sn(),G(),window.addEventListener("hashchange",()=>{Sn(),G(),window.scrollTo(0,0)}),document.getElementById("refresh")?.addEventListener("click",()=>{pn(!0)}),pn(!1)}_t();})();
+
+</script>
+</body>
+</html>
