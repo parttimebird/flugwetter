@@ -1,0 +1,21 @@
+{
+  "name": "flugwetter-prototyp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Personalisierbare Flugwetter-Bewertung für Gleitschirm-Startplätze (Prototyp)",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "report": "node scripts/report.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "node scripts/build-app.ts"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "esbuild": "^0.24.2",
+    "typescript": "5.9"
+  }
+}

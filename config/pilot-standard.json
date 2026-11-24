@@ -1,0 +1,40 @@
+{
+  "pilot_id": "standard",
+  "comfort_profile": {
+    "base_model": "community",
+    "pilot_profile": "progress",
+    "tolerance": {
+      "wind_comfort": {
+        "max_score_acceptable": 4,
+        "importance_weight": 1.0
+      },
+      "thermic_character": {
+        "max_score_acceptable": 4,
+        "importance_weight": 1.2
+      },
+      "shear_turbulence": {
+        "max_score_acceptable": 3,
+        "importance_weight": 1.5
+      },
+      "structure_cap": {
+        "max_score_acceptable": 4,
+        "importance_weight": 0.8
+      }
+    },
+    "min_required_scores_for_goal": {
+      "chill": {
+        "thermic_character_min": 1,
+        "wind_comfort_max": 3
+      },
+      "progress": {
+        "thermic_character_min": 2,
+        "shear_turbulence_max": 4
+      },
+      "xc": {
+        "thermic_character_min": 3,
+        "wind_comfort_max": 5,
+        "shear_turbulence_max": 5
+      }
+    }
+  }
+}
