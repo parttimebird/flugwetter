@@ -1,15 +1,28 @@
-// Flugwetter für mich: die Handy-App (Schritt 2).
+// Flugwetter für mich: die Handy-App (Schritt 2, erweitert in Schritt 3 um Character und persönliche Zonen).
 // Holt die Vorhersage direkt bei Open-Meteo (oder nimmt einen gespeicherten bzw. mitgelieferten Stand),
-// bewertet sie mit der Engine aus Schritt 1 und zeigt die Flugfenster, die zu deinem Pilotenprofil passen.
+// bewertet sie mit der Engine aus Schritt 1 und zeigt die Flugfenster, die zu deinem Character und Tagesmodus passen.
 
 import { SITE_LIST, SPOTS } from '../src/spots.ts';
 import { buildUrl, fetchRaw, parseResponse, type OpenMeteoResponse } from '../src/openmeteo.ts';
 import { evaluateForecast, rescoreForPilot } from '../src/engine.ts';
 import { clockTime, compass, sunTimes } from '../src/physics.ts';
-import { DIM_NAMES, GOAL_NAMES } from '../src/profile.ts';
-import { ZONE_NAMES } from '../src/windows.ts';
+import { DIM_NAMES, GOAL_NAMES, PZONE_NAMES, dimensionZone, envelopeOf, modeLimit } from '../src/profile.ts';
 import { DEFAULT_CONFIG } from '../src/config.ts';
-import type { DaySummary, DimensionKey, Goal, HourEvaluation, PilotProfile, Spot, SpotEvaluation } from '../src/types.ts';
+import {
+  CURRENCY_OPTIONS,
+  SAFETY_QUESTIONS,
+  SKILL_QUESTIONS,
+  STYLE_NAMES,
+  STYLE_OPTIONS,
+  WING_OPTIONS,
+  scoreCharacter,
+  type CharacterAnswers,
+  type CharacterResult,
+  type Currency,
+  type FlightStyle,
+  type WingClass,
+} from '../src/character.ts';
+import type { DaySummary, DimensionKey, EnvelopeLimits, Goal, HourEvaluation, PersonalZone, PilotProfile, Spot, SpotEvaluation } from '../src/types.ts';
 
 declare const __DEFAULT_PILOT__: PilotProfile;
 
@@ -18,9 +31,12 @@ interface Snapshot {
   spots: Record<string, OpenMeteoResponse>;
 }
 type DataMode = 'live' | 'cache' | 'snapshot';
-type View = 'fenster' | 'profil' | 'info' | 'detail';
+type View = 'fenster' | 'profil' | 'info' | 'detail' | 'character';
 
-const PROFILE_KEY = 'flugwetter.profil.v1';
+// v2: Profil mit Character und Zonen-Grenzen. v1 (Schritt 2) wird beim ersten Start übernommen und bleibt unverändert,
+// damit die alte Fassung der App auf demselben Gerät weiterläuft.
+const PROFILE_KEY = 'flugwetter.profil.v2';
+const LEGACY_PROFILE_KEY = 'flugwetter.profil.v1';
 const CACHE_KEY = 'flugwetter.vorhersage.v1';
 const REGION_KEY = 'flugwetter.region.v1';
 const CACHE_FRESH_MIN = 60;
@@ -38,10 +54,16 @@ const REGIONS = [
   { id: 'sued', label: 'Süd', region: 'Südschwarzwald' },
 ];
 const GOAL_HINT: Record<Goal, string> = {
-  chill: 'ruhig gleiten, wenig Thermik',
-  progress: 'nutzbare Thermik zum Üben',
-  xc: 'kräftige Thermik für Strecke',
+  chill: 'mehr Aussicht als Adrenalin',
+  progress: 'bewusst ein Stück wachsen',
+  xc: 'Strecke mit Plan',
 };
+const MODE_ZONE_TEXT: Record<Goal, string> = {
+  chill: 'nur Stunden in deiner Komfort-Zone',
+  progress: 'Stunden bis in deine Progress-Zone',
+  xc: 'Stunden bis in deine Challenge-Zone',
+};
+const LEVEL_NAMES: Record<keyof EnvelopeLimits, string> = { comfort: 'Komfort', progress: 'Progress', challenge: 'Challenge' };
 const DIM_HINT: Record<DimensionKey, string> = {
   wind_comfort: '0 windstill, 2 mäßig (um 10 km/h), 4 kräftig (über 20 km/h)',
   thermic_character: '1 schwach und flach, 3 gut nutzbar, 4 kräftig und sportlich',
@@ -66,6 +88,8 @@ const state = {
   evals: [] as SpotEvaluation[],
   loading: 'Lade Vorhersage …',
   error: '',
+  /** kurze Bestätigung oben auf der Flugfenster-Seite, verschwindet beim Wechsel der Ansicht */
+  flash: '',
 };
 
 // In der Claude-Vorschau sperrt der Browser Abrufe an fremde Server (Content Security Policy). Dann gibt es dort nur den
@@ -115,18 +139,23 @@ function writeStore(key: string, value: string): void {
   }
 }
 
+function clone<T>(x: T): T {
+  return JSON.parse(JSON.stringify(x)) as T;
+}
+
 function clonePilot(p: PilotProfile): PilotProfile {
-  return JSON.parse(JSON.stringify(p)) as PilotProfile;
+  return clone(p);
 }
 
 function loadProfile(): PilotProfile {
-  const raw = readStore(PROFILE_KEY);
-  if (raw) {
+  for (const key of [PROFILE_KEY, LEGACY_PROFILE_KEY]) {
+    const raw = readStore(key);
+    if (!raw) continue;
     try {
       const p = JSON.parse(raw) as PilotProfile;
       if (p?.comfort_profile?.tolerance && p.comfort_profile.min_required_scores_for_goal) return p;
     } catch {
-      // kaputter Eintrag: Standard nehmen
+      // kaputter Eintrag: nächsten versuchen bzw. Standard nehmen
     }
   }
   return clonePilot(__DEFAULT_PILOT__);
@@ -134,6 +163,69 @@ function loadProfile(): PilotProfile {
 
 function saveProfile(): void {
   writeStore(PROFILE_KEY, JSON.stringify(state.pilot));
+}
+
+// ---------------------------------------------------------------------------
+// Character und Tagesmodus
+// ---------------------------------------------------------------------------
+
+function characterResult(): CharacterResult | null {
+  return state.pilot.character ? scoreCharacter(state.pilot.character) : null;
+}
+
+function chosenMode(): Goal {
+  return state.pilot.comfort_profile.pilot_profile;
+}
+
+/** XC rechnet der Coach als Progress, solange der Character dafür noch nicht reicht (Flow-Entwurf: condition_downgrade_xc). */
+function effectiveMode(): Goal {
+  const mode = chosenMode();
+  const r = characterResult();
+  return mode === 'xc' && r && !r.xcAdvised ? 'progress' : mode;
+}
+
+/** Profil, mit dem die Engine rechnet: wie gespeichert, nur mit dem tatsächlich wirksamen Modus */
+function scoringPilot(): PilotProfile {
+  const mode = effectiveMode();
+  if (mode === chosenMode()) return state.pilot;
+  const p = clonePilot(state.pilot);
+  p.comfort_profile.pilot_profile = mode;
+  return p;
+}
+
+function setMode(mode: Goal): void {
+  state.pilot.comfort_profile.pilot_profile = mode;
+  state.flash = '';
+  saveProfile();
+  rescore();
+  render();
+}
+
+/** Zonen-Grenzen zum Bearbeiten: legt sie aus der alten Einzelgrenze an, falls es noch keine gibt. */
+function editableEnvelope(): Record<DimensionKey, EnvelopeLimits> {
+  const cp = state.pilot.comfort_profile;
+  cp.envelope ??= clone(envelopeOf(state.pilot));
+  return cp.envelope;
+}
+
+/** Setzt die Zonen auf das, was der Character ergibt (die alte Einzelgrenze folgt der Progress-Grenze). */
+function resetZonesFromCharacter(): void {
+  const r = characterResult();
+  if (!r) return;
+  const cp = state.pilot.comfort_profile;
+  cp.envelope = clone(r.envelope);
+  for (const k of DIM_KEYS) {
+    if (cp.tolerance[k]) cp.tolerance[k].max_score_acceptable = r.envelope[k].progress;
+  }
+  saveProfile();
+  rescore();
+}
+
+/** Übernimmt einen Character: Grenzen aus der Starttabelle, Tagesmodus nach Flugstil. */
+function applyCharacter(answers: CharacterAnswers): void {
+  state.pilot.character = { ...answers, createdAt: new Date().toISOString() };
+  state.pilot.comfort_profile.pilot_profile = scoreCharacter(answers).defaultMode;
+  resetZonesFromCharacter();
 }
 
 function readCache(): Snapshot | null {
@@ -283,7 +375,7 @@ async function useSnapshot(snap: Snapshot, mode: DataMode): Promise<void> {
   for (const spot of SPOTS) {
     const raw = snap.spots[spot.site.id];
     if (!raw) continue;
-    base.push(evaluateForecast(spot, parseResponse(raw, { fetchedAt: snap.fetched_at }), state.pilot));
+    base.push(evaluateForecast(spot, parseResponse(raw, { fetchedAt: snap.fetched_at }), scoringPilot()));
   }
   state.base = base;
   state.evals = base;
@@ -301,7 +393,8 @@ function setLoading(text: string): void {
 }
 
 function rescore(): void {
-  state.evals = state.base.map((ev) => rescoreForPilot(ev, state.pilot));
+  const pilot = scoringPilot();
+  state.evals = state.base.map((ev) => rescoreForPilot(ev, pilot));
 }
 
 // ---------------------------------------------------------------------------
@@ -366,14 +459,16 @@ function h<K extends keyof HTMLElementTagNameMap>(
 }
 
 const num1 = (x: number) => x.toLocaleString('de-DE', { maximumFractionDigits: 1 });
+/** Zonen-Grenzen gehen in Viertelstufen */
+const num2 = (x: number) => x.toLocaleString('de-DE', { maximumFractionDigits: 2 });
 const kmh = (x: number) => `${Math.round(x)} km/h`;
 
-function zonePill(zone: HourEvaluation['zone'], text: string): HTMLElement {
-  return h('span', { class: `pill z-${zone}` }, text);
+function zonePill(zone: PersonalZone, text: string): HTMLElement {
+  return h('span', { class: `pill p-${zone}` }, text);
 }
 
 function windowText(w: DaySummary['windows'][number]): string {
-  return `${w.start.slice(0, 2)}–${w.end.slice(0, 2)} Uhr · ${ZONE_NAMES[w.zone]}`;
+  return `${w.start.slice(0, 2)}–${w.end.slice(0, 2)} Uhr · ${PZONE_NAMES[w.personalZone]}`;
 }
 
 function hourStrip(ev: SpotEvaluation, date: string): HTMLElement {
@@ -381,9 +476,10 @@ function hourStrip(ev: SpotEvaluation, date: string): HTMLElement {
   if (hours.length === 0) return h('div');
   const min = DEFAULT_CONFIG.windowMinFit;
   const bars = hours.map((x) => {
-    const weak = x.zone !== 'no-go' && x.fit.score < min;
-    const cls = [`z-${x.zone}`, weak ? 'weak' : '', isPast(x.time) ? 'past' : ''].filter(Boolean).join(' ');
-    const title = `${x.time.slice(11, 16)} ${x.zoneLabel}${x.zone === 'no-go' ? '' : `, Passung ${x.fit.score}`}`;
+    const pz = x.fit.personalZone;
+    const weak = pz !== 'no-go' && x.fit.score < min;
+    const cls = [`p-${pz}`, weak ? 'weak' : '', isPast(x.time) ? 'past' : ''].filter(Boolean).join(' ');
+    const title = `${x.time.slice(11, 16)} ${PZONE_NAMES[pz]}${pz === 'no-go' ? '' : `, ${x.zoneLabel}, Passung ${x.fit.score}`}`;
     return h('span', { class: cls, title });
   });
   return h(
@@ -434,7 +530,7 @@ function renderTabs(): void {
   for (const id of ['fenster', 'profil', 'info']) {
     const a = document.getElementById(`tab-${id}`);
     if (!a) continue;
-    const active = state.view === id || (id === 'fenster' && state.view === 'detail');
+    const active = state.view === id || (id === 'fenster' && state.view === 'detail') || (id === 'profil' && state.view === 'character');
     if (active) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');
   }
@@ -467,7 +563,7 @@ function dayChips(onPick: (d: string) => void, single?: SpotEvaluation): HTMLEle
         { class: 'day', type: 'button', 'aria-pressed': String(date === state.day), onclick: () => onPick(date) },
         h('span', { class: 'd1' }, `${dayName(date)} ${dateShort(date)}`),
         h('span', { class: 'd2' }, text),
-        h('span', { class: 'dots' }, best ? h('i', { class: `z-${best.zone}` }) : h('i')),
+        h('span', { class: 'dots' }, best ? h('i', { class: `p-${best.personalZone}` }) : h('i')),
       );
     }),
   );
@@ -496,13 +592,58 @@ function regionChips(): HTMLElement {
   );
 }
 
+function modeButtons(): HTMLElement {
+  const mode = chosenMode();
+  return h(
+    'div',
+    { class: 'seg', role: 'group', 'aria-label': 'Tagesmodus' },
+    (['chill', 'progress', 'xc'] as Goal[]).map((g) =>
+      h(
+        'button',
+        { type: 'button', 'aria-pressed': String(mode === g), onclick: () => setMode(g) },
+        h('b', {}, GOAL_NAMES[g]),
+        h('span', {}, GOAL_HINT[g]),
+      ),
+    ),
+  );
+}
+
+function coachLine(): HTMLElement | null {
+  const r = characterResult();
+  if (chosenMode() === 'xc' && r && !r.xcAdvised) {
+    return h('p', { class: 'coach' }, `Der Coach rechnet heute mit Progress statt XC. ${r.xcReason} Das ist keine Wertung, sondern deine Sicherheitsreserve.`);
+  }
+  return null;
+}
+
+function modeBar(): HTMLElement {
+  return h(
+    'section',
+    { class: 'modebar', 'aria-label': 'Tagesmodus' },
+    h('h3', {}, 'Dein Modus heute'),
+    modeButtons(),
+    coachLine() ?? h('p', { class: 'small' }, `Als Flugfenster zählen ${MODE_ZONE_TEXT[effectiveMode()]}.`),
+  );
+}
+
+function characterPrompt(): HTMLElement | null {
+  if (state.flash) return h('p', { class: 'coach ok', role: 'status' }, state.flash);
+  if (state.pilot.character) return null;
+  return h(
+    'div',
+    { class: 'coach' },
+    h('p', {}, 'Deine Zonen beruhen noch auf einem Standardprofil. Leg deinen Character an, dann passen grün, gelb und orange zu dir. Das dauert etwa zwei Minuten.'),
+    h('a', { class: 'btn primary', href: '#character' }, 'Character anlegen'),
+  );
+}
+
 function spotCard(ev: SpotEvaluation, day: DaySummary): HTMLElement {
   const s = ev.spot;
   const fit = bestFit(day);
   const wins = day.windows.length > 0
-    ? day.windows.map((w) => zonePill(w.zone, windowText(w)))
+    ? day.windows.map((w) => zonePill(w.personalZone, windowText(w)))
     : day.bestHour
-      ? [h('span', { class: 'small' }, `Beste Stunde ${day.bestHour.time.slice(11, 13)} Uhr: ${day.bestHour.zoneLabel}, ${day.bestHour.fit.label}`)]
+      ? [h('span', { class: 'small' }, `Beste Stunde ${day.bestHour.time.slice(11, 13)} Uhr: ${PZONE_NAMES[day.bestHour.fit.personalZone]}, ${day.bestHour.fit.label}`)]
       : [];
   return h(
     'button',
@@ -530,6 +671,9 @@ function renderWindows(view: HTMLElement): void {
 
   const spot0 = rows[0]?.ev.spot ?? SPOTS[0];
   const sun = date ? sunTimes(spot0.lat, spot0.lon, date) : null;
+  const prompt = characterPrompt();
+  view.append(modeBar());
+  if (prompt) view.append(prompt);
   view.append(
     dayChips((d) => {
       state.day = d;
@@ -543,7 +687,7 @@ function renderWindows(view: HTMLElement): void {
       h(
         'p',
         {},
-        `${good.length} von ${rows.length} Startplätzen mit Flugfenster für dein Profil (${GOAL_NAMES[state.pilot.comfort_profile.pilot_profile]})` +
+        `${good.length} von ${rows.length} Startplätzen mit Flugfenster im Modus ${GOAL_NAMES[effectiveMode()]}` +
           (sun ? ` · Sonne ${clockTime(sun.sunrise)} bis ${clockTime(sun.sunset)} Uhr` : ''),
       ),
     ),
@@ -552,10 +696,10 @@ function renderWindows(view: HTMLElement): void {
   if (good.length > 0) {
     view.append(h('section', { class: 'group' }, h('h3', {}, 'Passt zu dir'), good.map((r) => spotCard(r.ev, r.day))));
   } else {
-    view.append(h('p', { class: 'empty' }, 'An diesem Tag passt kein Startplatz zu deinem Profil. Weiter unten steht, was fliegbar wäre und was dagegen spricht.'));
+    view.append(h('p', { class: 'empty' }, `An diesem Tag passt kein Startplatz zu deinem Modus ${GOAL_NAMES[effectiveMode()]}. Weiter unten steht, was fliegbar wäre und was dagegen spricht.`));
   }
   if (meh.length > 0) {
-    view.append(h('section', { class: 'group' }, h('h3', {}, 'Fliegbar, aber nicht dein Ziel'), meh.map((r) => spotCard(r.ev, r.day))));
+    view.append(h('section', { class: 'group' }, h('h3', {}, 'Fliegbar, aber nicht in deinem Modus'), meh.map((r) => spotCard(r.ev, r.day))));
   }
   if (bad.length > 0) {
     view.append(
@@ -588,19 +732,22 @@ function openSpot(id: string): void {
 // Ansicht: Startplatz im Detail
 // ---------------------------------------------------------------------------
 
+/** Balken einer Dimension in der Farbe deiner Zone, mit Strich an der Grenze deines Tagesmodus */
 function dimCell(k: DimensionKey, x: HourEvaluation): HTMLElement {
   const d = x.dimensions[k];
-  const tol = state.pilot.comfort_profile.tolerance[k]?.max_score_acceptable;
-  const over = tol !== undefined && d.score > tol;
+  const pilot = scoringPilot();
+  const z = dimensionZone(d.score, envelopeOf(pilot)[k]);
+  const mode = effectiveMode();
+  const limit = modeLimit(pilot, k, mode);
   return h(
     'div',
-    { class: 'dim', title: `${DIM_NAMES[k]}: ${d.label}` },
+    { class: 'dim', title: `${DIM_NAMES[k]}: ${d.label}, bei dir ${PZONE_NAMES[z]}` },
     h('span', { class: 'dl' }, h('span', {}, DIM_SHORT[k]), h('b', {}, d.display)),
     h(
       'span',
       { class: 'bar' },
-      h('span', { class: over ? 'over' : '', style: `width:${(d.score / 5) * 100}%` }),
-      tol !== undefined ? h('i', { style: `left:calc(${(tol / 5) * 100}% - 1px)`, title: `deine Grenze ${num1(tol)}` }) : null,
+      h('span', { class: `p-${z}`, style: `width:${Math.min(100, (d.score / 5) * 100)}%` }),
+      h('i', { style: `left:calc(${(limit / 5) * 100}% - 1px)`, title: `deine Grenze für ${GOAL_NAMES[mode]}: ${num2(limit)}` }),
     ),
   );
 }
@@ -626,6 +773,7 @@ function hourRow(x: HourEvaluation): HTMLElement {
   if (x.zone !== 'no-go') for (const n of x.fit.notes) notes.push(h('li', { class: 'info' }, n));
   for (const w of x.warnings) notes.push(h('li', { class: 'warn' }, w));
 
+  const pz = x.fit.personalZone;
   return h(
     'article',
     { class: `hour${isPast(x.time) ? ' past' : ''}` },
@@ -633,8 +781,9 @@ function hourRow(x: HourEvaluation): HTMLElement {
       'div',
       { class: 'h1' },
       h('time', { datetime: x.time }, x.time.slice(11, 16)),
-      zonePill(x.zone, x.zoneLabel),
-      h('span', { class: 'fitline' }, x.zone === 'no-go' ? '' : h('span', {}, h('b', {}, String(x.fit.score)), ` ${x.fit.label}`)),
+      zonePill(pz, pz === 'no-go' ? x.zoneLabel : PZONE_NAMES[pz]),
+      pz === 'no-go' ? null : h('span', { class: 'air', title: 'Lufttyp' }, x.zoneLabel),
+      h('span', { class: 'fitline' }, pz === 'no-go' ? '' : h('span', {}, h('b', {}, String(x.fit.score)), ` ${x.fit.label}`)),
     ),
     h('div', { class: 'dims' }, DIM_KEYS.map((k) => dimCell(k, x))),
     h('p', { class: 'keydata' }, keyData(x)),
@@ -734,6 +883,51 @@ function renderDetail(view: HTMLElement): void {
 }
 
 // ---------------------------------------------------------------------------
+// Bausteine für Zonen
+// ---------------------------------------------------------------------------
+
+const LEVELS: (keyof EnvelopeLimits)[] = ['comfort', 'progress', 'challenge'];
+
+/** Skala 0 bis 5, eingefärbt nach deinen vier Zonen */
+function zoneScale(limits: EnvelopeLimits): HTMLElement {
+  const pct = (v: number) => `${(v / 5) * 100}%`;
+  const parts: [PersonalZone, number, number][] = [
+    ['green', 0, limits.comfort],
+    ['yellow', limits.comfort, limits.progress],
+    ['orange', limits.progress, limits.challenge],
+    ['red', limits.challenge, 5],
+  ];
+  return h(
+    'div',
+    { class: 'zscale', 'aria-hidden': 'true' },
+    parts.filter(([, from, to]) => to > from).map(([z, from, to]) => h('span', { class: `p-${z}`, style: `left:${pct(from)};width:${pct(to - from)}` })),
+  );
+}
+
+function zoneTicks(): HTMLElement {
+  return h('div', { class: 'zticks', 'aria-hidden': 'true' }, [0, 1, 2, 3, 4, 5].map((n) => h('span', {}, String(n))));
+}
+
+function limitsText(l: EnvelopeLimits): string {
+  return `Komfort bis ${num2(l.comfort)}, Progress bis ${num2(l.progress)}, Challenge bis ${num2(l.challenge)}`;
+}
+
+function zoneLegend(withNoGo = false): HTMLElement {
+  const zones: PersonalZone[] = withNoGo ? ['green', 'yellow', 'orange', 'red', 'no-go'] : ['green', 'yellow', 'orange', 'red'];
+  return h('div', { class: 'legend' }, zones.map((z) => zonePill(z, PZONE_NAMES[z])));
+}
+
+function characterSummary(c: CharacterAnswers, r: CharacterResult): string {
+  return `Flugstil ${STYLE_NAMES[c.style]}, Technik-Score ${r.skillTotal} (${r.skillLabel}), Sicherheits-Score ${r.safetyTotal} (${r.safetyLabel})`;
+}
+
+function gearText(c: CharacterAnswers): string {
+  const wing = WING_OPTIONS.find((o) => o.id === c.wing)?.title ?? c.wing;
+  const flights = CURRENCY_OPTIONS.find((o) => o.id === c.currency)?.title ?? '';
+  return `Schirm ${wing}, ${flights}`;
+}
+
+// ---------------------------------------------------------------------------
 // Ansicht: Profil
 // ---------------------------------------------------------------------------
 
@@ -751,7 +945,7 @@ function profileSummaryText(): string {
     }
   }
   if (days.length === 0) return 'Noch keine Vorhersage geladen.';
-  return `Mit diesem Profil: ${windows} Flugfenster an ${spots.size} von ${state.evals.length} Startplätzen in den nächsten ${days.length} Tagen.`;
+  return `Im Modus ${GOAL_NAMES[effectiveMode()]}: ${windows} Flugfenster an ${spots.size} von ${state.evals.length} Startplätzen in den nächsten ${days.length} Tagen.`;
 }
 
 function profileChanged(summary: HTMLElement): void {
@@ -804,70 +998,92 @@ const REQ_LABELS: Record<ReqKey, string> = {
 };
 const REQ_DEFAULT: Record<ReqKey, number> = { thermic_character_min: 2, structure_cap_min: 2, wind_comfort_max: 3, shear_turbulence_max: 3 };
 
+/** Drei Regler pro Dimension. Die Reihenfolge Komfort ≤ Progress ≤ Challenge bleibt immer erhalten: die Nachbarn rutschen mit. */
+function zoneEditor(k: DimensionKey, summary: HTMLElement): HTMLElement {
+  const limits = editableEnvelope()[k];
+  const tol = state.pilot.comfort_profile.tolerance[k];
+  let scale = zoneScale(limits);
+  const controls = new Map<keyof EnvelopeLimits, { input: HTMLInputElement; out: HTMLElement }>();
+  const rows = LEVELS.map((level, i) => {
+    const id = `env-${k}-${level}`;
+    const out = h('output', { for: id }, num2(limits[level]));
+    const input = h('input', {
+      type: 'range',
+      id,
+      min: 0,
+      max: 5,
+      step: 0.25,
+      value: limits[level],
+      oninput: (e: Event) => {
+        const v = Number((e.target as HTMLInputElement).value);
+        limits[level] = v;
+        LEVELS.forEach((other, j) => {
+          if (j < i && limits[other] > v) limits[other] = v;
+          if (j > i && limits[other] < v) limits[other] = v;
+        });
+        if (tol) tol.max_score_acceptable = limits.progress;
+        for (const [l, c] of controls) {
+          c.input.value = String(limits[l]);
+          c.out.textContent = num2(limits[l]);
+        }
+        const next = zoneScale(limits);
+        scale.replaceWith(next);
+        scale = next;
+        profileChanged(summary);
+      },
+    });
+    controls.set(level, { input, out });
+    return h('div', { class: `slider lvl-${level}` }, h('label', { for: id }, h('span', {}, `${LEVEL_NAMES[level]} bis`), out), input);
+  });
+  return h('div', { class: 'dimset' }, h('h4', {}, DIM_NAMES[k]), h('span', { class: 'hint' }, DIM_HINT[k]), h('div', { class: 'zwrap' }, scale, zoneTicks()), rows);
+}
+
+function characterBox(): HTMLElement {
+  const c = state.pilot.character;
+  const r = characterResult();
+  if (!c || !r) {
+    return h(
+      'section',
+      { class: 'box' },
+      h('h3', {}, 'Dein Character'),
+      h('p', {}, 'Noch nicht angelegt. Bis dahin rechnet die App mit einem Standardprofil, und deine Zonen unten sind daraus abgeleitet.'),
+      h('a', { class: 'btn primary', href: '#character' }, 'Character anlegen'),
+    );
+  }
+  const created = c.createdAt ? berlin(new Date(c.createdAt)).text.slice(0, 6) : '';
+  return h(
+    'section',
+    { class: 'box' },
+    h('h3', {}, 'Dein Character'),
+    h('p', {}, `${characterSummary(c, r)}. ${gearText(c)}.`),
+    h('p', { class: 'small' }, `${created ? `Angelegt am ${created} ` : ''}Wenn sich deine Technik oder dein Gefühl in der Luft verändert, lies dich einfach neu ein.`),
+    h('a', { class: 'btn', href: '#character' }, 'Character neu einlesen'),
+  );
+}
+
 function renderProfile(view: HTMLElement): void {
   const cp = state.pilot.comfort_profile;
   const summary = h('p', { class: 'summary', role: 'status' }, profileSummaryText());
+  const mode = effectiveMode();
 
-  const goalButtons = h(
-    'div',
-    { class: 'seg', role: 'group', 'aria-label': 'Ziel' },
-    (['chill', 'progress', 'xc'] as Goal[]).map((g) =>
-      h(
-        'button',
-        {
-          type: 'button',
-          'aria-pressed': String(cp.pilot_profile === g),
-          onclick: () => {
-            cp.pilot_profile = g;
-            saveProfile();
-            rescore();
-            render();
-          },
-        },
-        h('b', {}, GOAL_NAMES[g]),
-        h('span', {}, GOAL_HINT[g]),
-      ),
-    ),
-  );
-
-  const tolerance = DIM_KEYS.map((k) => {
+  const weights = DIM_KEYS.map((k) => {
     const t = cp.tolerance[k];
-    return h(
-      'div',
-      { class: 'dimset' },
-      h('h4', {}, DIM_NAMES[k]),
-      slider({
-        id: `tol-${k}`,
-        label: 'Höchstens bis Stufe',
-        hint: DIM_HINT[k],
-        min: 0,
-        max: 5,
-        step: 0.5,
-        value: t.max_score_acceptable,
-        format: num1,
-        onChange: (v) => {
-          t.max_score_acceptable = v;
-          profileChanged(summary);
-        },
-      }),
-      slider({
-        id: `w-${k}`,
-        label: 'Wie wichtig dir das ist',
-        min: 0,
-        max: 2,
-        step: 0.1,
-        value: t.importance_weight,
-        format: weightText,
-        onChange: (v) => {
-          t.importance_weight = v;
-          profileChanged(summary);
-        },
-      }),
-    );
+    return slider({
+      id: `w-${k}`,
+      label: DIM_NAMES[k],
+      min: 0,
+      max: 2,
+      step: 0.1,
+      value: t.importance_weight,
+      format: weightText,
+      onChange: (v) => {
+        t.importance_weight = v;
+        profileChanged(summary);
+      },
+    });
   });
 
-  const goal = cp.pilot_profile;
-  const req = (cp.min_required_scores_for_goal[goal] ??= {});
+  const req = (cp.min_required_scores_for_goal[mode] ??= {});
   const reqRows = (Object.keys(REQ_LABELS) as ReqKey[]).map((key) => {
     const active = req[key] !== undefined;
     const value = req[key] ?? REQ_DEFAULT[key];
@@ -904,47 +1120,317 @@ function renderProfile(view: HTMLElement): void {
     return [check, sliderEl];
   });
 
+  // Zurücksetzen löscht auch den Character, deshalb zweimal tippen statt eines Dialogs.
+  const reset = h(
+    'button',
+    {
+      class: 'btn',
+      type: 'button',
+      onclick: () => {
+        if (reset.dataset.armed !== '1') {
+          reset.dataset.armed = '1';
+          reset.classList.add('danger');
+          reset.textContent = 'Nochmal tippen: Character und Zonen werden gelöscht';
+          return;
+        }
+        state.pilot = clonePilot(__DEFAULT_PILOT__);
+        wizard.draft = null;
+        wizard.step = 0;
+        saveProfile();
+        rescore();
+        render();
+      },
+    },
+    'Alles auf Standard zurücksetzen',
+  );
+
   view.append(
+    characterBox(),
+    h('section', { class: 'box' }, h('h3', {}, 'Dein Modus heute'), modeButtons(), coachLine() ?? h('p', { class: 'small' }, `Als Flugfenster zählen ${MODE_ZONE_TEXT[mode]}.`), summary),
     h(
       'section',
       { class: 'box' },
-      h('h3', {}, 'Dein Ziel'),
-      goalButtons,
-      summary,
-    ),
-    h(
-      'section',
-      { class: 'box' },
-      h('h3', {}, 'Was du dir zumutest'),
-      h('p', { class: 'small' }, 'Liegt eine Stufe über deiner Grenze, sinkt die Passung, je wichtiger dir die Dimension ist, desto stärker. Die Grenze siehst du in der Stundenansicht als Strich auf dem Balken.'),
-      tolerance,
-    ),
-    h(
-      'section',
-      { class: 'box' },
-      h('h3', {}, `Was ${GOAL_NAMES[goal]} mindestens braucht`),
-      h('p', { class: 'small' }, 'Reicht eine Stunde dafür nicht, kostet das 25 Punkte Passung. Haken weg heißt: wird nicht geprüft.'),
-      h('div', { class: 'req' }, reqRows.flat()),
-    ),
-    h(
-      'section',
-      { class: 'box' },
-      h('p', { class: 'small' }, 'Dein Profil wird nur auf diesem Gerät gespeichert. Der Standard entspricht deiner user_konfig.'),
+      h('h3', {}, 'Deine Zonen'),
       h(
-        'button',
-        {
-          class: 'btn',
-          type: 'button',
-          onclick: () => {
-            state.pilot = clonePilot(__DEFAULT_PILOT__);
-            saveProfile();
-            rescore();
-            render();
-          },
-        },
-        'Auf Standard zurücksetzen',
+        'p',
+        { class: 'small' },
+        'Für jede Dimension drei Grenzen: bis wohin du entspannt fliegst (Komfort), wo du bewusst wächst (Progress) und was du dir an XC-Tagen zumutest (Challenge). Darüber beginnt die Überforderung, die nie als Flugfenster zählt. In der Stundenansicht markiert ein Strich auf dem Balken die Grenze deines Modus.',
+      ),
+      zoneLegend(),
+      DIM_KEYS.map((k) => zoneEditor(k, summary)),
+      state.pilot.character
+        ? h(
+            'button',
+            {
+              class: 'btn',
+              type: 'button',
+              onclick: () => {
+                resetZonesFromCharacter();
+                render();
+              },
+            },
+            'Zonen aus dem Character neu berechnen',
+          )
+        : null,
+    ),
+    // <details> selbst bleibt ein Block (als Grid-Container ist es in älteren Browsern unzuverlässig)
+    h(
+      'details',
+      { class: 'box more' },
+      h('summary', {}, 'Feineinstellungen'),
+      h(
+        'div',
+        { class: 'more-body' },
+        h('h4', {}, 'Wie stark eine Überschreitung zählt'),
+        h(
+          'p',
+          { class: 'small' },
+          'Liegt eine Dimension über der Grenze deines Modus, zählt die Stunde nicht als Flugfenster. Die Gewichtung bestimmt, wie weit die Passung dann sinkt, und damit die Reihenfolge der Startplätze ohne Fenster.',
+        ),
+        weights,
+        h('h4', {}, `Was ${GOAL_NAMES[mode]} mindestens braucht`),
+        h('p', { class: 'small' }, 'Reicht eine Stunde dafür nicht, kostet das 25 Punkte Passung. Haken weg heißt: wird nicht geprüft.'),
+        h('div', { class: 'req' }, reqRows.flat()),
       ),
     ),
+    h('section', { class: 'box' }, h('p', { class: 'small' }, 'Character, Zonen und Modus werden nur auf diesem Gerät gespeichert.'), reset),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Ansicht: Character anlegen (fünf Schritte, Fragen aus dem Flow-Entwurf)
+// ---------------------------------------------------------------------------
+
+interface Draft {
+  style?: FlightStyle;
+  wing?: WingClass;
+  currency?: Currency;
+  skills: Record<string, number>;
+  safety: Record<string, number>;
+}
+
+const WIZARD_STEPS = ['Flugstil', 'Schirm und Flugpraxis', 'Technik', 'Sicherheitsgefühl', 'Ergebnis'];
+const wizard = { step: 0, draft: null as Draft | null };
+
+function wizardDraft(): Draft {
+  if (!wizard.draft) {
+    const c = state.pilot.character;
+    wizard.draft = c
+      ? { style: c.style, wing: c.wing, currency: c.currency, skills: { ...c.skills }, safety: { ...c.safety } }
+      : { skills: {}, safety: {} };
+  }
+  return wizard.draft;
+}
+
+function openQuestions(step: number, d: Draft): number {
+  if (step === 0) return d.style ? 0 : 1;
+  if (step === 1) return (d.wing ? 0 : 1) + (d.currency ? 0 : 1);
+  if (step === 2) return SKILL_QUESTIONS.filter((q) => d.skills[q.id] === undefined).length;
+  if (step === 3) return SAFETY_QUESTIONS.filter((q) => d.safety[q.id] === undefined).length;
+  return 0;
+}
+
+function goStep(step: number): void {
+  wizard.step = Math.max(0, Math.min(WIZARD_STEPS.length - 1, step));
+  render();
+  window.scrollTo(0, 0);
+}
+
+function leaveWizard(target: string): void {
+  wizard.step = 0;
+  wizard.draft = null;
+  location.hash = target;
+}
+
+function choiceList<T extends string>(label: string, options: { id: T; title: string; text?: string }[], value: T | undefined, onPick: (id: T) => void): HTMLElement {
+  const buttons: HTMLElement[] = options.map((o) =>
+    h(
+      'button',
+      {
+        type: 'button',
+        class: 'choice',
+        'aria-pressed': String(o.id === value),
+        onclick: (e: Event) => {
+          for (const b of buttons) b.setAttribute('aria-pressed', String(b === e.currentTarget));
+          onPick(o.id);
+        },
+      },
+      h('b', {}, o.title),
+      o.text ? h('span', {}, o.text) : null,
+    ),
+  );
+  return h('div', { class: 'choices', role: 'group', 'aria-label': label }, buttons);
+}
+
+/** Eine Frage mit Antwort 0 bis 5 als sechs Tasten (auf dem Handy treffsicherer als ein Regler, und nichts ist vorbelegt) */
+function ratingRow(q: { id: string; label: string }, values: Record<string, number>, ends: [string, string], onChange: () => void): HTMLElement {
+  const labelId = `q-${q.id}`;
+  const buttons: HTMLElement[] = [0, 1, 2, 3, 4, 5].map((n) =>
+    h(
+      'button',
+      {
+        type: 'button',
+        'aria-pressed': String(values[q.id] === n),
+        onclick: (e: Event) => {
+          values[q.id] = n;
+          for (const b of buttons) b.setAttribute('aria-pressed', String(b === e.currentTarget));
+          onChange();
+        },
+      },
+      String(n),
+    ),
+  );
+  return h(
+    'div',
+    { class: 'q rate', role: 'group', 'aria-labelledby': labelId },
+    h('p', { id: labelId }, q.label),
+    h('div', { class: 'rate-btns' }, buttons),
+    h('div', { class: 'rate-ends', 'aria-hidden': 'true' }, h('span', {}, ends[0]), h('span', {}, ends[1])),
+  );
+}
+
+function scoreMeter(label: string, value: number, max: number, bands: number[], text: string): HTMLElement {
+  return h(
+    'div',
+    { class: 'meter' },
+    h('div', { class: 'meter-head' }, h('span', {}, label), h('b', {}, `${value} von ${max}`)),
+    h(
+      'span',
+      { class: 'bar', role: 'img', 'aria-label': `${label}: ${value} von ${max}` },
+      h('span', { style: `width:${(value / max) * 100}%` }),
+      bands.map((b) => h('i', { style: `left:calc(${(b / max) * 100}% - 1px)` })),
+    ),
+    h('span', { class: 'small' }, text),
+  );
+}
+
+function characterResultView(d: Draft): HTMLElement[] {
+  const answers: CharacterAnswers = { style: d.style!, wing: d.wing!, currency: d.currency!, skills: d.skills, safety: d.safety };
+  const r = scoreCharacter(answers);
+  return [
+    h('p', { class: 'lead' }, `Dein aktuelles Profil: ${characterSummary(answers, r)}. Dieses Profil bildet die Basis für deine persönlichen Komfort- und Challenge-Zonen.`),
+    h('div', { class: 'meters' }, scoreMeter('Technik', r.skillTotal, 50, [15, 30, 40], r.skillLabel), scoreMeter('Sicherheitsgefühl', r.safetyTotal, 40, [20, 30], r.safetyLabel)),
+    h('h3', {}, 'Deine Zonen'),
+    zoneLegend(),
+    h(
+      'div',
+      { class: 'zlist' },
+      DIM_KEYS.map((k) =>
+        h('div', { class: 'zrow' }, h('div', { class: 'zrow-head' }, h('b', {}, DIM_NAMES[k]), h('span', {}, limitsText(r.envelope[k]))), zoneScale(r.envelope[k]), zoneTicks()),
+      ),
+    ),
+    h('h3', {}, 'Wie die Grenzen zustande kommen'),
+    h('ul', { class: 'plain' }, h('li', {}, `Grundlage ist die Starttabelle für deine Technik-Stufe „${r.skillLabel}“.`), r.adjustments.map((a) => h('li', {}, a))),
+    h(
+      'p',
+      { class: 'coach' },
+      r.xcAdvised
+        ? 'XC passt zu deinem Character: An XC-Tagen zählen Stunden bis in deine Challenge-Zone.'
+        : `Für XC rechnet der Coach vorerst mit Progress. ${r.xcReason} Das ist keine Wertung, sondern deine Sicherheitsreserve.`,
+    ),
+    h('p', {}, `Tagesmodus zum Start: ${GOAL_NAMES[r.defaultMode]}, passend zu deinem Flugstil. Du kannst ihn jeden Tag neu wählen.`),
+    state.pilot.comfort_profile.envelope ? h('p', { class: 'small' }, 'Übernehmen ersetzt deine bisherigen Zonen.') : null,
+  ].filter((x): x is HTMLElement => x !== null);
+}
+
+function renderCharacter(view: HTMLElement): void {
+  const d = wizardDraft();
+  if (wizard.step === WIZARD_STEPS.length - 1) {
+    const open = [0, 1, 2, 3].find((s) => openQuestions(s, d) > 0);
+    if (open !== undefined) wizard.step = open;
+  }
+  const step = wizard.step;
+  const items: { el: HTMLElement; done: () => boolean }[] = [];
+  const openHint = h('span', { class: 'open' });
+  const update = () => {
+    const open = openQuestions(step, d);
+    openHint.textContent = open === 0 ? '' : open === 1 ? 'noch 1 Frage offen' : `noch ${open} Fragen offen`;
+    for (const it of items) if (it.done()) it.el.classList.remove('missing');
+  };
+  const question = (title: string, control: HTMLElement, done: () => boolean): HTMLElement => {
+    const el = h('div', { class: 'q' }, h('h3', {}, title), control);
+    items.push({ el, done });
+    return el;
+  };
+
+  let body: HTMLElement[];
+  if (step === 0) {
+    body = [
+      h(
+        'p',
+        { class: 'lead' },
+        'Fünf kurze Schritte, etwa zwei Minuten. Aus deinen Antworten berechnet die App deine persönlichen Zonen: grün Komfort, gelb Progress, orange Challenge und rot Überforderung. Ehrliche Antworten helfen dir mehr als gute, und alles bleibt auf diesem Gerät.',
+      ),
+      question('Welcher Flugstil beschreibt dich aktuell am besten?', choiceList('Flugstil', STYLE_OPTIONS, d.style, (id) => ((d.style = id), update())), () => !!d.style),
+    ];
+  } else if (step === 1) {
+    body = [
+      question('Welche Schirmklasse fliegst du gerade?', choiceList('Schirmklasse', WING_OPTIONS, d.wing, (id) => ((d.wing = id), update())), () => !!d.wing),
+      question('Wie oft fliegst du?', choiceList('Flüge pro Jahr', CURRENCY_OPTIONS, d.currency, (id) => ((d.currency = id), update())), () => !!d.currency),
+      h('p', { class: 'small' }, 'Schirmklasse und Flugpraxis verschieben deine Grenzen ein wenig, vor allem beim Wind.'),
+    ];
+  } else if (step === 2) {
+    body = [
+      h('p', { class: 'lead' }, 'Wie sicher beherrschst du das heute? 0 heißt: kann ich noch nicht. 5 heißt: sicher und routiniert.'),
+      ...SKILL_QUESTIONS.map((q) => {
+        const el = ratingRow(q, d.skills, ['kann ich noch nicht', 'sicher und routiniert'], update);
+        items.push({ el, done: () => d.skills[q.id] !== undefined });
+        return el;
+      }),
+    ];
+  } else if (step === 3) {
+    body = [
+      h('p', { class: 'lead' }, 'Hier geht es um dein Gefühl in der Luft, nicht um Können. Wie sehr trifft das auf dich zu? 0 heißt: gar nicht, 5: voll und ganz.'),
+      ...SAFETY_QUESTIONS.map((q) => {
+        const el = ratingRow(q, d.safety, ['trifft gar nicht zu', 'trifft voll zu'], update);
+        items.push({ el, done: () => d.safety[q.id] !== undefined });
+        return el;
+      }),
+    ];
+  } else {
+    body = characterResultView(d);
+  }
+
+  const last = step === WIZARD_STEPS.length - 1;
+  const back =
+    step === 0
+      ? h('button', { type: 'button', class: 'btn', onclick: () => leaveWizard(state.pilot.character ? 'profil' : 'fenster') }, 'Abbrechen')
+      : h('button', { type: 'button', class: 'btn', onclick: () => goStep(step - 1) }, 'Zurück');
+  const next = h(
+    'button',
+    {
+      type: 'button',
+      class: 'btn primary',
+      onclick: () => {
+        if (last) {
+          applyCharacter({ style: d.style!, wing: d.wing!, currency: d.currency!, skills: d.skills, safety: d.safety });
+          state.flash = `Character übernommen. Die Flugfenster zeigen jetzt deine persönlichen Zonen im Modus ${GOAL_NAMES[effectiveMode()]}.`;
+          leaveWizard('fenster');
+          return;
+        }
+        const missing = items.filter((it) => !it.done());
+        if (missing.length > 0) {
+          for (const it of missing) it.el.classList.add('missing');
+          missing[0].el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          return;
+        }
+        goStep(step + 1);
+      },
+    },
+    last ? 'Übernehmen' : step === WIZARD_STEPS.length - 2 ? 'Zum Ergebnis' : 'Weiter',
+  );
+  update();
+
+  view.append(
+    h(
+      'div',
+      { class: 'wizard-head' },
+      h('h2', {}, state.pilot.character ? 'Character neu einlesen' : 'Dein Character'),
+      h('p', { class: 'small' }, `Schritt ${step + 1} von ${WIZARD_STEPS.length}: ${WIZARD_STEPS[step]}`),
+      h('div', { class: 'stepbar', 'aria-hidden': 'true' }, WIZARD_STEPS.map((_, i) => h('i', { class: i <= step ? 'on' : '' }))),
+    ),
+    h('section', { class: last ? 'wizard box' : 'wizard' }, body),
+    h('div', { class: 'wnav' }, back, openHint, next),
   );
 }
 
@@ -953,14 +1439,6 @@ function renderProfile(view: HTMLElement): void {
 // ---------------------------------------------------------------------------
 
 function renderInfo(view: HTMLElement): void {
-  const legend = h(
-    'div',
-    { class: 'legend' },
-    zonePill('chill', 'Chill'),
-    zonePill('progress', 'Progress'),
-    zonePill('xc', 'XC'),
-    zonePill('no-go', 'No-Go'),
-  );
   const source =
     state.mode !== 'snapshot'
       ? 'Dein Handy holt die Vorhersage selbst bei Open-Meteo, je Gelände in drei Teilen. Ein Abruf bleibt eine Stunde lang auf dem Gerät gespeichert.'
@@ -1008,15 +1486,40 @@ function renderInfo(view: HTMLElement): void {
     h(
       'section',
       { class: 'box' },
-      h('h3', {}, 'Zonen'),
-      legend,
+      h('h3', {}, 'Deine Zonen'),
+      zoneLegend(true),
       h(
         'ul',
         {},
-        h('li', {}, 'Chill: ruhige Luft, schwache oder keine Thermik, gut für Gleitflüge.'),
-        h('li', {}, 'Progress: nutzbare Thermik oder Soaring-Wind, auch etwas bewegtere Luft.'),
-        h('li', {}, 'XC: kräftige Thermik und genug Arbeitshöhe für Strecke.'),
-        h('li', {}, 'No-Go: Nacht, Niederschlag, Nebel, Start in der Wolke, zu viel Wind oder Böen, falsche Windrichtung, Lee, Auflagen des Geländes oder zu heftige Bedingungen.'),
+        h('li', {}, 'Komfort: Bedingungen, in denen du entspannt und sicher fliegst.'),
+        h('li', {}, 'Progress: etwas über deiner Komfortzone, gut zum bewussten Lernen.'),
+        h('li', {}, 'Challenge: anspruchsvoll, für XC-Tage mit klarer Sicherheitsstrategie.'),
+        h('li', {}, 'Überforderung: über deinen Grenzen. Zählt nie als Flugfenster.'),
+        h('li', {}, 'No-Go: feste Regeln, unabhängig von dir: Nacht, Niederschlag, Nebel, Start in der Wolke, zu viel Wind oder Böen, falsche Windrichtung, Lee, Auflagen des Geländes oder zu heftige Bedingungen.'),
+      ),
+      h('p', { class: 'small' }, 'Die Grenzen kommen aus deinem Character und lassen sich im Profil verstellen. Für jede Stunde entscheidet die anspruchsvollste der vier Dimensionen.'),
+    ),
+    h(
+      'section',
+      { class: 'box' },
+      h('h3', {}, 'Tagesmodus'),
+      h(
+        'ul',
+        {},
+        h('li', {}, 'Chill: Fokus auf Aussicht, saubere Starts und Landungen. Als Flugfenster zählen nur Stunden in deiner Komfort-Zone.'),
+        h('li', {}, 'Progress: bewusst ein Stück wachsen, mit klaren Lernzielen. Es zählen Stunden bis in deine Progress-Zone.'),
+        h('li', {}, 'XC: weiter fliegen mit klarer Sicherheitsstrategie. Es zählen Stunden bis in deine Challenge-Zone.'),
+      ),
+      h('p', { class: 'small' }, 'Solange dein Technik-Score unter 31 von 50 oder dein Sicherheits-Score unter 21 von 40 liegt, rechnet der Coach XC als Progress.'),
+    ),
+    h(
+      'section',
+      { class: 'box' },
+      h('h3', {}, 'Lufttyp'),
+      h(
+        'p',
+        {},
+        'Neben deiner Zone beschreibt die App die Luft selbst, unabhängig von dir: ruhig (kaum oder leichte Thermik), lebhaft (nutzbare Thermik, Soaring-Wind oder unruhige Luft) und Streckenwetter (kräftige Thermik und genug Arbeitshöhe).',
       ),
     ),
     h(
@@ -1031,7 +1534,11 @@ function renderInfo(view: HTMLElement): void {
         h('li', {}, 'Scherung: Windscherung, Böen, Wind im Verhältnis zur Thermik, Lee. 1 ruhig, 3 bewegt, 4 ruppig.'),
         h('li', {}, 'Deckel: nutzbare Höhe über dem Start bis Thermikobergrenze oder Basis. 1 etwa 350 m, 2 700 m, 3 1200 m, 4 über 2000 m.'),
       ),
-      h('p', { class: 'small' }, 'Unterstufen: „2−“ ist knapp unter 2, „2+“ knapp darüber. Passung: 100 minus Abzüge, wenn eine Dimension über deiner Grenze liegt, und minus 25, wenn es für dein Ziel nicht reicht. Ab 60 zählt eine Stunde zum Flugfenster.'),
+      h(
+        'p',
+        { class: 'small' },
+        'Unterstufen: „2−“ ist knapp unter 2, „2+“ knapp darüber. Passung: 100, wenn alle vier Dimensionen in der Zone deines Modus liegen, 75, wenn es für den Modus nicht ganz reicht (zum Beispiel zu wenig Thermik für XC). Liegt eine Dimension darüber, bleibt die Passung unter 50, bei Überforderung unter 20. Ab 60 zählt eine Stunde zum Flugfenster.',
+      ),
     ),
     h(
       'section',
@@ -1040,10 +1547,10 @@ function renderInfo(view: HTMLElement): void {
       h(
         'ul',
         {},
-        h('li', {}, 'Die Schwellen sind Startwerte und noch nicht an echten Flügen geeicht. Das kommt mit dem Flug-Feedback in Schritt 3.'),
+        h('li', {}, 'Die Starttabelle für deine Zonen und die Schwellen der Dimensionen sind Startwerte und noch nicht an echten Flügen geeicht. Das soll später das Flugtagebuch übernehmen.'),
         h('li', {}, 'Das Modellgelände ist geglättet. Düsen, Talwind und lokale Effekte fehlen, am Merkur ist der Wind oft stärker als vorhergesagt.'),
         h('li', {}, 'Bei Windstille gelten alle Startrichtungen eines Bergs als möglich. Welcher Hang Sonne hat, ist noch nicht eingerechnet.'),
-        h('li', {}, 'Die App ersetzt nicht den Blick auf Stationen, Webcams und die Lage vor Ort.'),
+        h('li', {}, 'Die App ersetzt nicht den Blick auf Stationen, Webcams und die Lage vor Ort. Bewusst nicht zu starten ist eine starke Entscheidung.'),
       ),
     ),
   );
@@ -1055,7 +1562,7 @@ function renderInfo(view: HTMLElement): void {
 
 function readHash(): void {
   const id = decodeURIComponent(location.hash.slice(1));
-  if (id === 'profil' || id === 'info') {
+  if (id === 'profil' || id === 'info' || id === 'character') {
     state.view = id;
   } else if (SPOTS.some((s) => s.id === id)) {
     state.view = 'detail';
@@ -1083,6 +1590,10 @@ function render(): void {
     renderInfo(view);
     return;
   }
+  if (state.view === 'character') {
+    renderCharacter(view);
+    return;
+  }
   if (state.evals.length === 0) {
     view.append(h('p', { class: 'empty' }, state.loading || 'Lade Vorhersage …'));
     return;
@@ -1096,6 +1607,7 @@ function start(): void {
   render();
   window.addEventListener('hashchange', () => {
     readHash();
+    if (state.view !== 'fenster') state.flash = '';
     render();
     window.scrollTo(0, 0);
   });

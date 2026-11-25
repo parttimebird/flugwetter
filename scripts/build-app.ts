@@ -1,6 +1,8 @@
 // Baut die Handy-App zu einer einzigen HTML-Datei.
 //
 //   node scripts/build-app.ts
+//   APP_VARIANT=vorschau node scripts/build-app.ts   Vorschau-Fassung mit eigenem Namen und Hinweis in der Kopfzeile,
+//                                                    damit man sie auf dem Handy nicht mit der Live-Fassung verwechselt
 //
 // Ergebnis in dist/:
 //   index.html          vollständige Seite für einen normalen Webserver (z. B. GitHub Pages): holt live bei Open-Meteo
@@ -39,9 +41,13 @@ const fonts = [
 ].join('\n');
 
 const DESCRIPTION = 'Flugfenster an Schwarzwald-Startplätzen, bewertet nach deinem Pilotenprofil.';
+const preview = (process.env.APP_VARIANT ?? '') !== '';
+const APP_NAME = preview ? 'Flugwetter Vorschau' : 'Flugwetter für mich';
+const SHORT_NAME = preview ? 'FW Vorschau' : 'Flugwetter';
+const badge = preview ? '\n    <p class="badge">Vorschau, nicht die Live-App</p>' : '';
 
 const body = `<header class="top">
-  <div class="wrap">
+  <div class="wrap">${badge}
     <div class="brand">
       <h1>Flugwetter für mich</h1>
       <button class="refresh" id="refresh" type="button">Aktualisieren</button>
@@ -58,7 +64,7 @@ const body = `<header class="top">
   <div class="wrap" id="view"><p class="empty">Lade Vorhersage …</p></div>
 </main>`;
 
-const artifact = `<title>Flugwetter für mich</title>
+const artifact = `<title>${APP_NAME}</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 ${fonts}
 <style>
@@ -78,14 +84,14 @@ const web = `<!doctype html>
 <meta name="theme-color" content="#eef2ef" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0f1513" media="(prefers-color-scheme: dark)">
 <meta name="description" content="${DESCRIPTION}">
-<title>Flugwetter für mich</title>
+<title>${APP_NAME}</title>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
 <link rel="icon" href="icons/icon-192.png" type="image/png" sizes="192x192">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="Flugwetter">
+<meta name="apple-mobile-web-app-title" content="${SHORT_NAME}">
 ${fonts}
 <style>
 :root { padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); }
@@ -106,8 +112,8 @@ writeFileSync(join(out, 'artifact.html'), artifact);
 writeFileSync(join(out, 'index.html'), web);
 
 const manifest = {
-  name: 'Flugwetter für mich',
-  short_name: 'Flugwetter',
+  name: APP_NAME,
+  short_name: SHORT_NAME,
   description: DESCRIPTION,
   lang: 'de',
   start_url: './',
@@ -130,5 +136,6 @@ const fixtures = readdirSync(join(root, 'fixtures')).filter((f) => f.startsWith(
 const newest = fixtures[fixtures.length - 1];
 copyFileSync(join(root, 'fixtures', newest), join(out, 'data/forecast.json'));
 
+if (preview) console.log(`Vorschau-Fassung (${process.env.APP_VARIANT})`);
 console.log(`dist/artifact.html ${(artifact.length / 1024).toFixed(0)} KB, dist/index.html ${(web.length / 1024).toFixed(0)} KB`);
 console.log(`dist/data/forecast.json aus fixtures/${newest}`);

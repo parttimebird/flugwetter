@@ -389,14 +389,14 @@ export function classifyZone(
   if (D >= z.noGoStructure || T >= 4.8) return { zone: 'no-go', label: 'No-Go (Überentwicklung)' };
   const sporty = Math.max(W, S, T) >= 3.5;
   if (T >= z.xcThermal && D >= z.xcStructure && W <= z.xcMaxWind && S <= z.xcMaxShear) {
-    return { zone: 'xc', label: sporty ? 'XC (sportlich)' : 'XC' };
+    return { zone: 'xc', label: sporty ? 'Streckenwetter, sportlich' : 'Streckenwetter' };
   }
   if (T >= z.progressThermal || W >= z.progressWind || S >= z.progressShear) {
-    if (sporty) return { zone: 'progress', label: 'Progress (sportlich)' };
-    if (T < 1.5 && W >= z.progressWind) return { zone: 'progress', label: 'Progress (Soaring im Wind)' };
-    if (T < 1.5 && S >= z.progressShear) return { zone: 'progress', label: 'Progress (unruhige Luft)' };
-    return { zone: 'progress', label: 'Progress' };
+    if (sporty) return { zone: 'progress', label: 'lebhaft, sportlich' };
+    if (T < 1.5 && W >= z.progressWind) return { zone: 'progress', label: 'Soaring im Wind' };
+    if (T < 1.5 && S >= z.progressShear) return { zone: 'progress', label: 'unruhige Luft' };
+    return { zone: 'progress', label: 'lebhaft, thermisch' };
   }
-  if (T < 0.8) return { zone: 'chill', label: 'Chill (Abgleiter)' };
-  return { zone: 'chill', label: 'Chill' };
+  if (T < 0.8) return { zone: 'chill', label: 'ruhig, kaum Thermik' };
+  return { zone: 'chill', label: 'ruhig, leichte Thermik' };
 }

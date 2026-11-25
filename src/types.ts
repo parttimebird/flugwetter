@@ -2,8 +2,22 @@
 // Einheiten intern: Höhe in m über NN, Temperatur in °C, Wind in m/s, Richtung in Grad (woher der Wind kommt).
 
 export type DimensionKey = 'wind_comfort' | 'thermic_character' | 'shear_turbulence' | 'structure_cap';
+/** Lufttyp aus dem Wetter allein (ruhig, lebhaft, Streckenwetter, No-Go), unabhängig vom Piloten. */
 export type Zone = 'chill' | 'progress' | 'xc' | 'no-go';
+/** Tagesmodus des Piloten: Chill, Progress oder XC. */
 export type Goal = 'chill' | 'progress' | 'xc';
+/**
+ * Persönliche Zone einer Stunde: grün = Komfort, gelb = Progress, orange = XC-Challenge, rot = Überforderung.
+ * 'no-go' heißt: nach den festen Regeln nicht fliegbar (Nacht, Regen, falsche Windrichtung …), für jeden Piloten.
+ */
+export type PersonalZone = 'green' | 'yellow' | 'orange' | 'red' | 'no-go';
+
+/** Grenzen einer Dimension (Skala 0 bis 5): bis `comfort` grün, bis `progress` gelb, bis `challenge` orange, darüber rot. */
+export interface EnvelopeLimits {
+  comfort: number;
+  progress: number;
+  challenge: number;
+}
 
 /** Windrichtungs-Sektor (woher), im Uhrzeigersinn von `from` bis `to`, z. B. 330 → 120 über Nord. */
 export interface Sector {
@@ -190,6 +204,10 @@ export interface FitResult {
   /** 0–100 */
   score: number;
   label: string;
+  /** persönliche Zone dieser Stunde */
+  personalZone: PersonalZone;
+  /** Tagesmodus, für den die Passung berechnet wurde */
+  mode: Goal;
   /** Überschreitung der persönlichen Toleranz pro Dimension */
   exceed: Partial<Record<DimensionKey, number>>;
   goalsMet: Goal[];
@@ -220,6 +238,8 @@ export interface FlightWindow {
   end: string;
   hours: number;
   zone: Zone;
+  /** die anspruchsvollste persönliche Zone im Fenster */
+  personalZone: PersonalZone;
   fitMax: number;
   fitMean: number;
   dims: Record<DimensionKey, number>;
@@ -244,13 +264,22 @@ export interface SpotEvaluation {
   days: DaySummary[];
 }
 
-/** Pilotenprofil, entspricht user_konfig.txt */
+/** Pilotenprofil, entspricht user_konfig.txt, erweitert um Character und persönliche Zonen */
 export interface PilotProfile {
   pilot_id: string;
+  /** Antworten aus dem Character-Onboarding, falls schon eingelesen */
+  character?: import('./character.ts').CharacterAnswers;
   comfort_profile: {
     base_model: string;
+    /** gewählter Tagesmodus */
     pilot_profile: Goal;
+    /**
+     * Gewicht pro Dimension. `max_score_acceptable` ist die alte Einzelgrenze; gibt es `envelope`, zählt das,
+     * sonst wird daraus die Progress-Grenze (Komfort 0,5 darunter, Challenge 0,5 darüber).
+     */
     tolerance: Record<DimensionKey, { max_score_acceptable: number; importance_weight: number }>;
+    /** persönliche Zonen-Grenzen pro Dimension */
+    envelope?: Record<DimensionKey, EnvelopeLimits>;
     min_required_scores_for_goal: Record<
       Goal,
       {
