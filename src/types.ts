@@ -4,8 +4,24 @@
 export type DimensionKey = 'wind_comfort' | 'thermic_character' | 'shear_turbulence' | 'structure_cap';
 /** Lufttyp aus dem Wetter allein (ruhig, lebhaft, Streckenwetter, No-Go), unabhängig vom Piloten. */
 export type Zone = 'chill' | 'progress' | 'xc' | 'no-go';
-/** Tagesmodus des Piloten: Chill, Progress oder XC. */
+/**
+ * Tagesmodus des Piloten. Angezeigt als Chill, Flow und Push (bis Schritt 3 hießen sie Chill, Progress und XC; die
+ * internen Schlüssel bleiben, damit gespeicherte Profile weiter gelten).
+ */
 export type Goal = 'chill' | 'progress' | 'xc';
+
+/** Seitenwind am Start: nein = nur Gegenwind, leicht = schwacher Seitenwind, ja = was der Startplatz hergibt */
+export type CrosswindTolerance = 'no' | 'light' | 'yes';
+/** Rückenwind am Start: nein, oder leicht (nur für sehr erfahrene Piloten und nur im Modus Push) */
+export type TailwindTolerance = 'no' | 'light';
+
+/** Persönliche Startbedingungen aus dem Character, im Profil verstellbar */
+export interface LaunchPrefs {
+  crosswind: CrosswindTolerance;
+  tailwind: TailwindTolerance;
+  /** Rückwärtsaufziehen sicher? undefined = nicht gefragt (Standardprofil) */
+  reverseLaunch?: boolean;
+}
 /**
  * Persönliche Zone einer Stunde: grün = Komfort, gelb = Progress, orange = XC-Challenge, rot = Überforderung.
  * 'no-go' heißt: nach den festen Regeln nicht fliegbar (Nacht, Regen, falsche Windrichtung …), für jeden Piloten.
@@ -165,6 +181,8 @@ export interface DimensionScore {
 export interface HourMetrics {
   takeoffWindKmh: number;
   takeoffWindDir: number;
+  /** Windrichtung am Start liegt im Windfenster des Startplatzes */
+  takeoffInSector: boolean;
   headwindKmh: number;
   crosswindKmh: number;
   /** Wind 200–800 m über dem Start */
@@ -212,6 +230,8 @@ export interface FitResult {
   exceed: Partial<Record<DimensionKey, number>>;
   goalsMet: Goal[];
   notes: string[];
+  /** Startbedingungen, die nicht zu deinem Character passen (dann zählt die Stunde nie als Flugfenster) */
+  launchIssues: string[];
 }
 
 export interface NoGoReason {
@@ -227,6 +247,8 @@ export interface HourEvaluation {
   dimensions: Record<DimensionKey, DimensionScore>;
   noGo: NoGoReason[];
   warnings: string[];
+  /** neutrale Hinweise, z. B. Soaring möglich */
+  hints: string[];
   zone: Zone;
   zoneLabel: string;
   fit: FitResult;
@@ -269,6 +291,8 @@ export interface PilotProfile {
   pilot_id: string;
   /** Antworten aus dem Character-Onboarding, falls schon eingelesen */
   character?: import('./character.ts').CharacterAnswers;
+  /** persönliche Startbedingungen; fehlen sie, gilt das vorsichtige Standard: kein Seiten- und kein Rückenwind */
+  launch?: LaunchPrefs;
   comfort_profile: {
     base_model: string;
     /** gewählter Tagesmodus */

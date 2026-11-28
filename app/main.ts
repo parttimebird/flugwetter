@@ -6,23 +6,43 @@ import { SITE_LIST, SPOTS } from '../src/spots.ts';
 import { buildUrl, fetchRaw, parseResponse, type OpenMeteoResponse } from '../src/openmeteo.ts';
 import { evaluateForecast, rescoreForPilot } from '../src/engine.ts';
 import { clockTime, compass, sunTimes } from '../src/physics.ts';
-import { DIM_NAMES, GOAL_NAMES, PZONE_NAMES, dimensionZone, envelopeOf, modeLimit } from '../src/profile.ts';
+import { DIM_NAMES, GOAL_NAMES, LAUNCH_LIMITS, PZONE_NAMES, dimensionZone, envelopeOf, launchPrefsOf, modeLimit } from '../src/profile.ts';
 import { DEFAULT_CONFIG } from '../src/config.ts';
+import { climbOutlook } from '../src/evaluate.ts';
+import { alt100, baseWindClass, capitalize, gustClass, gustQuality, plus100 } from '../src/format.ts';
 import {
+  CROSSWIND_OPTIONS,
   CURRENCY_OPTIONS,
+  FAMILIAR_OPTIONS,
+  REVERSE_OPTIONS,
   SAFETY_QUESTIONS,
   SKILL_QUESTIONS,
   STYLE_NAMES,
   STYLE_OPTIONS,
+  TAILWIND_OPTIONS,
   WING_OPTIONS,
+  normalizeStyle,
   scoreCharacter,
   type CharacterAnswers,
   type CharacterResult,
   type Currency,
+  type Familiarity,
   type FlightStyle,
   type WingClass,
 } from '../src/character.ts';
-import type { DaySummary, DimensionKey, EnvelopeLimits, Goal, HourEvaluation, PersonalZone, PilotProfile, Spot, SpotEvaluation } from '../src/types.ts';
+import type {
+  CrosswindTolerance,
+  DaySummary,
+  DimensionKey,
+  EnvelopeLimits,
+  Goal,
+  HourEvaluation,
+  PersonalZone,
+  PilotProfile,
+  Spot,
+  SpotEvaluation,
+  TailwindTolerance,
+} from '../src/types.ts';
 
 declare const __DEFAULT_PILOT__: PilotProfile;
 
@@ -44,8 +64,8 @@ const DIM_KEYS: DimensionKey[] = ['wind_comfort', 'thermic_character', 'shear_tu
 const DIM_SHORT: Record<DimensionKey, string> = {
   wind_comfort: 'Wind',
   thermic_character: 'Thermik',
-  shear_turbulence: 'Scherung',
-  structure_cap: 'Deckel',
+  shear_turbulence: 'Turbulenz',
+  structure_cap: 'Überhöhung',
 };
 const REGIONS = [
   { id: 'alle', label: 'Alle', region: '' },
@@ -54,21 +74,27 @@ const REGIONS = [
   { id: 'sued', label: 'Süd', region: 'Südschwarzwald' },
 ];
 const GOAL_HINT: Record<Goal, string> = {
-  chill: 'mehr Aussicht als Adrenalin',
-  progress: 'bewusst ein Stück wachsen',
-  xc: 'Strecke mit Plan',
+  chill: 'ruhig, einfach, gut kontrollierbar',
+  progress: 'aktiv, mit ausreichend Spielraum',
+  xc: 'anspruchsvoll und fordernd',
+};
+const GOAL_LONG: Record<Goal, string> = {
+  chill: 'Ruhige, einfache und gut kontrollierbare Bedingungen.',
+  progress: 'Gute, aktive Bedingungen mit ausreichend Spielraum.',
+  xc: 'Anspruchsvolle, grenzwertige oder fordernde Bedingungen, zum Beispiel für Strecke: Thermik und Basishöhe über längere Zeit.',
 };
 const MODE_ZONE_TEXT: Record<Goal, string> = {
   chill: 'nur Stunden in deiner Komfort-Zone',
   progress: 'Stunden bis in deine Progress-Zone',
   xc: 'Stunden bis in deine Challenge-Zone',
 };
+const ZONES_HINT = 'Diese Zonen wurden aus deinem Flugcharakter und deinen bisherigen Rückmeldungen entwickelt. Sie sind eine Orientierung, keine Festlegung.';
 const LEVEL_NAMES: Record<keyof EnvelopeLimits, string> = { comfort: 'Komfort', progress: 'Progress', challenge: 'Challenge' };
 const DIM_HINT: Record<DimensionKey, string> = {
-  wind_comfort: '0 windstill, 2 mäßig (um 10 km/h), 4 kräftig (über 20 km/h)',
+  wind_comfort: '0 windstill, 1 um 5 km/h, 2 um 10, 3 um 15, 4 um 22 km/h am Start; Böen und Wind oben heben die Stufe',
   thermic_character: '1 schwach und flach, 3 gut nutzbar, 4 kräftig und sportlich',
   shear_turbulence: '1 ruhig, 3 bewegt, 4 ruppig',
-  structure_cap: '1 flach gedeckelt, 3 gute Arbeitshöhe, 4 hochreichend',
+  structure_cap: '1 flach gedeckelt (rund 300 m über Start), 3 gute Arbeitshöhe (rund 1.200 m), 4 hochreichend',
 };
 
 // ---------------------------------------------------------------------------
@@ -153,7 +179,14 @@ function loadProfile(): PilotProfile {
     if (!raw) continue;
     try {
       const p = JSON.parse(raw) as PilotProfile;
-      if (p?.comfort_profile?.tolerance && p.comfort_profile.min_required_scores_for_goal) return p;
+      if (p?.comfort_profile?.tolerance && p.comfort_profile.min_required_scores_for_goal) {
+        // Flugstile aus Schritt 3 auf die neuen Typen umstellen; Startbedingungen aus dem Character nachtragen
+        if (p.character) {
+          p.character.style = normalizeStyle(p.character.style);
+          p.launch ??= scoreCharacter(p.character).launch;
+        }
+        return p;
+      }
     } catch {
       // kaputter Eintrag: nächsten versuchen bzw. Standard nehmen
     }
@@ -224,7 +257,9 @@ function resetZonesFromCharacter(): void {
 /** Übernimmt einen Character: Grenzen aus der Starttabelle, Tagesmodus nach Flugstil. */
 function applyCharacter(answers: CharacterAnswers): void {
   state.pilot.character = { ...answers, createdAt: new Date().toISOString() };
-  state.pilot.comfort_profile.pilot_profile = scoreCharacter(answers).defaultMode;
+  const r = scoreCharacter(answers);
+  state.pilot.comfort_profile.pilot_profile = r.defaultMode;
+  state.pilot.launch = clone(r.launch);
   resetZonesFromCharacter();
 }
 
@@ -463,8 +498,104 @@ const num1 = (x: number) => x.toLocaleString('de-DE', { maximumFractionDigits: 1
 const num2 = (x: number) => x.toLocaleString('de-DE', { maximumFractionDigits: 2 });
 const kmh = (x: number) => `${Math.round(x)} km/h`;
 
-function zonePill(zone: PersonalZone, text: string): HTMLElement {
-  return h('span', { class: `pill p-${zone}` }, text);
+// ---------------------------------------------------------------------------
+// Info-Icons: kurze Erklärungen, woher ein Wert kommt
+// ---------------------------------------------------------------------------
+
+type InfoKey = 'wind' | 'thermik' | 'basis' | 'turbulenz' | 'scherung' | 'ueberhoehung' | 'inversion';
+
+const INFO: Record<InfoKey, { title: string; text: string[] }> = {
+  wind: {
+    title: 'Grundwind und Böen',
+    text: [
+      'Grundwind: der mittlere Wind in Starthöhe, aus dem Modellwind knapp über dem geglätteten Modellgelände.',
+      'Böen: die stärksten Stöße in Bodennähe laut Modell. Je weiter Böen und Grundwind auseinanderliegen, desto unruhiger.',
+      'Grundwind: unter 10 km/h schwach, 10–15 mäßig, 15–20 frisch, 20–25 stark, 25–30 sehr stark. Böen: unter 10 sehr schwach, 10–15 schwach, 15–25 mäßig, 25–35 stark, darüber kritisch.',
+      'Wind aus der passenden Richtung kann den Start leichter machen als Windstille. Ab etwa 10 km/h ist Rückwärtsaufziehen die sicherere Startmethode.',
+    ],
+  },
+  thermik: {
+    title: 'Woher der Thermik-Wert kommt',
+    text: [
+      'Thermikstärke: geschätzter mittlerer Aufwind in der nutzbaren Schicht. Die App rechnet aus Sonneneinstrahlung und Bodentemperatur, wie viel Wärme in die Luft geht, und hebt ein Luftpaket durch das vorhergesagte Temperatur- und Taupunktprofil.',
+      'Daraus kommen die konvektive Geschwindigkeit w* und ein geschätztes Steigen abzüglich des Eigensinkens eines Schirms (etwa 1,1 m/s).',
+      'Der Wert gilt für den Gitterpunkt des Modells am Startplatz und für die jeweilige Stunde, nicht für einen einzelnen Hang. Sonnen- und Schattenseiten sind noch nicht eingerechnet.',
+      'Der Wert basiert auf Modellprognosen (ICON, Deutscher Wetterdienst) und kann durch lokale Effekte abweichen. Für die ersten zwei Tage ist das Modell feiner und meist zuverlässiger.',
+    ],
+  },
+  basis: {
+    title: 'Basis',
+    text: [
+      'Basis: geschätzte Höhe, in der sich Quellwolken bilden (Kondensationsniveau des aufsteigenden Luftpakets). Ohne Wolken heißt die Obergrenze Blauthermik.',
+      'Alle Höhen aus dem Modell sind auf 100 m gerundet. Genauer kann ein Modell mit etwa 2 km Maschenweite das nicht.',
+    ],
+  },
+  ueberhoehung: {
+    title: 'Mögliche Überhöhung / Deckel',
+    text: [
+      'Mögliche Überhöhung: wie weit du über den Start steigen kannst, bis zur Basis oder bis zur Obergrenze der Thermik.',
+      'Deckel: was die Thermik nach oben begrenzt, meist eine Inversion (eine Schicht, in der es nach oben wärmer wird) oder die Wolkenbasis.',
+      'Einschätzung: realistisch ab etwa 700 m Arbeitshöhe und brauchbarem Steigen, begrenzt darunter, unwahrscheinlich unter 300 m oder ohne Steigen. Mittlere und hohe Wolken dämpfen die Einstrahlung und damit die Thermik.',
+    ],
+  },
+  turbulenz: {
+    title: 'Turbulenz / Scherung',
+    text: [
+      'Das bewertet die App für dich, du musst Scherung nicht selbst einschätzen. Man könnte es auch Luftkomfort nennen: wie ruhig oder ruppig sich die Luft anfühlt.',
+      'Es zählt der stärkste von mehreren Treibern: Windscherung, Böen über dem Grundwind, Wind, der die Thermik zerreißt, kräftige Thermik selbst und Lee, wenn der Höhenwind nicht aus Startrichtung kommt. Kommen mehrere zusammen, gibt es einen Aufschlag.',
+    ],
+  },
+  scherung: {
+    title: 'Was ist Windscherung?',
+    text: [
+      'Windscherung bedeutet, dass Windrichtung oder Windgeschwindigkeit sich mit der Höhe ändern. Starke Änderungen können Turbulenz verstärken, besonders beim Durchbruch durch eine Inversion oder in Lee-Lagen.',
+      'Typisch ist sie an Inversionen (oben weht ein anderer Wind als in der Thermikschicht), wenn der Höhenwind zunimmt, und wenn Thermik in kräftigen Wind hineinsteigt.',
+    ],
+  },
+  inversion: {
+    title: 'Inversion',
+    text: [
+      'Eine Inversion ist eine Schicht, in der die Temperatur nach oben zunimmt. Sie bremst die Thermik und bildet oft den Deckel.',
+      'Kräftige Inversionen (ab etwa 2 °C auf 200 m) trennen oft Luftschichten mit verschiedenem Wind. Beim Durchstoßen kann es dann ruppig werden.',
+    ],
+  },
+};
+
+let infoSeq = 0;
+
+/** Kleines ⓘ hinter einer Überschrift. Tippen klappt die Erklärung darunter auf. */
+function infoTip(key: InfoKey): { button: HTMLElement; panel: HTMLElement } {
+  const id = `info-${key}-${++infoSeq}`;
+  const info = INFO[key];
+  const panel = h('div', { class: 'infopanel', id, hidden: true }, h('b', {}, info.title), info.text.map((t) => h('p', {}, t)));
+  const button = h(
+    'button',
+    {
+      type: 'button',
+      class: 'info-i',
+      'aria-expanded': 'false',
+      'aria-controls': id,
+      'aria-label': `Info: ${info.title}`,
+      onclick: (e: Event) => {
+        e.stopPropagation();
+        const open = panel.hidden;
+        panel.hidden = !open;
+        button.setAttribute('aria-expanded', String(open));
+      },
+    },
+    'i',
+  );
+  return { button, panel };
+}
+
+/** Überschrift mit Info-Icon und aufklappbarer Erklärung */
+function titledInfo(tag: 'h3' | 'h4', title: string, key: InfoKey): HTMLElement[] {
+  const tip = infoTip(key);
+  return [h(tag, { class: 'with-info' }, title, tip.button), tip.panel];
+}
+
+function zonePill(zone: PersonalZone, text: string, cu = false): HTMLElement {
+  return h('span', { class: `pill p-${zone}${cu ? ' cu' : ''}` }, text);
 }
 
 function windowText(w: DaySummary['windows'][number]): string {
@@ -478,8 +609,10 @@ function hourStrip(ev: SpotEvaluation, date: string): HTMLElement {
   const bars = hours.map((x) => {
     const pz = x.fit.personalZone;
     const weak = pz !== 'no-go' && x.fit.score < min;
-    const cls = [`p-${pz}`, weak ? 'weak' : '', isPast(x.time) ? 'past' : ''].filter(Boolean).join(' ');
-    const title = `${x.time.slice(11, 16)} ${PZONE_NAMES[pz]}${pz === 'no-go' ? '' : `, ${x.zoneLabel}, Passung ${x.fit.score}`}`;
+    // Quellwolken möglich: weiß schraffiert (auf grün also weiß-grün), keine reine Blauthermik
+    const cu = pz !== 'no-go' && x.metrics.cloudBaseMsl !== null;
+    const cls = [`p-${pz}`, weak ? 'weak' : '', cu ? 'cu' : '', isPast(x.time) ? 'past' : ''].filter(Boolean).join(' ');
+    const title = `${x.time.slice(11, 16)} ${PZONE_NAMES[pz]}${pz === 'no-go' ? '' : `, ${x.zoneLabel}, Passung ${x.fit.score}${cu ? ', Quellwolken möglich' : ''}`}`;
     return h('span', { class: cls, title });
   });
   return h(
@@ -611,7 +744,7 @@ function modeButtons(): HTMLElement {
 function coachLine(): HTMLElement | null {
   const r = characterResult();
   if (chosenMode() === 'xc' && r && !r.xcAdvised) {
-    return h('p', { class: 'coach' }, `Der Coach rechnet heute mit Progress statt XC. ${r.xcReason} Das ist keine Wertung, sondern deine Sicherheitsreserve.`);
+    return h('p', { class: 'coach' }, `Der Coach rechnet heute mit Flow statt Push. ${r.xcReason} Das ist keine Wertung, sondern deine Sicherheitsreserve.`);
   }
   return null;
 }
@@ -742,7 +875,7 @@ function dimCell(k: DimensionKey, x: HourEvaluation): HTMLElement {
   return h(
     'div',
     { class: 'dim', title: `${DIM_NAMES[k]}: ${d.label}, bei dir ${PZONE_NAMES[z]}` },
-    h('span', { class: 'dl' }, h('span', {}, DIM_SHORT[k]), h('b', {}, d.display)),
+    h('span', { class: 'dl' }, h('span', {}, DIM_SHORT[k]), h('b', {}, dimValue(k, x))),
     h(
       'span',
       { class: 'bar' },
@@ -752,14 +885,43 @@ function dimCell(k: DimensionKey, x: HourEvaluation): HTMLElement {
   );
 }
 
-function keyData(x: HourEvaluation): string {
+/** Absoluter Wert statt Stufe: Wind in km/h, Thermik als Steigen, Turbulenz als Wort, Überhöhung in Metern */
+function dimValue(k: DimensionKey, x: HourEvaluation): string {
   const m = x.metrics;
-  const parts = [`Start ${kmh(m.takeoffWindKmh)} aus ${compass(m.takeoffWindDir)}`, `darüber ${kmh(m.windAboveKmh)} aus ${compass(m.windAboveDir)}`];
+  if (k === 'wind_comfort') return `${Math.round(m.takeoffWindKmh)}/${Math.round(m.gustKmh)}`;
+  if (k === 'thermic_character') return m.wStar > 0.3 && m.climbEstimate >= 0.2 ? `${num1(m.climbEstimate)} m/s` : x.dimensions[k].label === 'keine Thermik' ? 'keine' : 'schwach';
+  if (k === 'shear_turbulence') return x.dimensions[k].label;
+  return m.workingHeight > 0 ? plus100(m.workingHeight) : '–';
+}
+
+/** Kennwerte einer Stunde: Grundwind und Böen getrennt, Höhen auf 100 m gerundet */
+function keyData(x: HourEvaluation): HTMLElement {
+  const m = x.metrics;
+  const quality = gustQuality(m.takeoffWindKmh, m.gustKmh);
+  const wind = h(
+    'span',
+    { class: 'kd' },
+    `Grundwind ${kmh(m.takeoffWindKmh)} aus ${compass(m.takeoffWindDir)} (${baseWindClass(m.takeoffWindKmh)}) · Böen ${kmh(m.gustKmh)} (${gustClass(m.gustKmh)})`,
+    quality ? ` · Böigkeit ${quality}` : '',
+  );
+  const parts = [`darüber ${kmh(m.windAboveKmh)} aus ${compass(m.windAboveDir)}`];
   if (m.wStar > 0.3) parts.push(m.climbEstimate >= 0.2 ? `Steigen ca. ${num1(m.climbEstimate)} m/s` : 'kaum nutzbares Steigen');
-  if (m.workingHeight > 0) parts.push(m.cloudBaseMsl !== null ? `Basis ${m.cloudBaseMsl} m` : `Thermik bis ${m.thermalTopMsl} m`);
-  if (m.inversion) parts.push(`Inversion ${m.inversion.baseMsl} m`);
-  parts.push(`Böen ${kmh(m.gustKmh)}`);
-  return parts.join(' · ');
+  if (m.workingHeight > 0) {
+    parts.push(m.cloudBaseMsl !== null ? `Basis ${alt100(m.cloudBaseMsl)}` : `Blauthermik bis ${alt100(m.thermalTopMsl)}`);
+    parts.push(`Überhöhung ${plus100(m.workingHeight)} (${climbOutlook(m)})`);
+  }
+  if (m.inversion) parts.push(`Inversion ${alt100(m.inversion.baseMsl)}`);
+  return h('p', { class: 'keydata' }, wind, h('br'), parts.join(' · '));
+}
+
+/** Begründung ohne Zahlenstufen: „Frischer Wind: …“, „Thermik schwach und flach: …“ */
+function reasonText(k: DimensionKey, x: HourEvaluation): string {
+  const d = x.dimensions[k];
+  const why = d.reasons.join(', ') || 'keine Besonderheit';
+  if (k === 'wind_comfort') return `${capitalize(d.label)}: ${why}`;
+  if (k === 'structure_cap') return `Überhöhung / Deckel: ${d.label}. ${capitalize(why)}`;
+  if (k === 'shear_turbulence') return `Turbulenz / Scherung ${d.label}: ${why}`;
+  return `Thermik ${d.label}: ${why}`;
 }
 
 function hourRow(x: HourEvaluation): HTMLElement {
@@ -770,8 +932,11 @@ function hourRow(x: HourEvaluation): HTMLElement {
       notes.push(h('li', { class: 'nogo' }, `${DIM_NAMES[d.key]}: ${d.reasons.join(', ')}`));
     }
   }
-  if (x.zone !== 'no-go') for (const n of x.fit.notes) notes.push(h('li', { class: 'info' }, n));
+  if (x.zone !== 'no-go') {
+    for (const n of x.fit.notes) notes.push(h('li', { class: x.fit.launchIssues.includes(n) ? 'nogo' : 'info' }, n));
+  }
   for (const w of x.warnings) notes.push(h('li', { class: 'warn' }, w));
+  for (const t of x.hints ?? []) notes.push(h('li', { class: 'hint' }, t));
 
   const pz = x.fit.personalZone;
   return h(
@@ -781,26 +946,58 @@ function hourRow(x: HourEvaluation): HTMLElement {
       'div',
       { class: 'h1' },
       h('time', { datetime: x.time }, x.time.slice(11, 16)),
-      zonePill(pz, pz === 'no-go' ? x.zoneLabel : PZONE_NAMES[pz]),
+      zonePill(pz, pz === 'no-go' ? x.zoneLabel : PZONE_NAMES[pz], pz !== 'no-go' && x.metrics.cloudBaseMsl !== null),
       pz === 'no-go' ? null : h('span', { class: 'air', title: 'Lufttyp' }, x.zoneLabel),
       h('span', { class: 'fitline' }, pz === 'no-go' ? '' : h('span', {}, h('b', {}, String(x.fit.score)), ` ${x.fit.label}`)),
     ),
     h('div', { class: 'dims' }, DIM_KEYS.map((k) => dimCell(k, x))),
-    h('p', { class: 'keydata' }, keyData(x)),
+    keyData(x),
     notes.length > 0 ? h('ul', { class: 'notes' }, notes) : null,
     h(
       'details',
       { class: 'why' },
-      h('summary', {}, 'Begründung der Stufen'),
+      h('summary', {}, 'Begründung'),
       h(
         'ul',
         {},
-        DIM_KEYS.map((k) => {
-          const d = x.dimensions[k];
-          return h('li', {}, `${DIM_NAMES[k]} ${d.display} (${d.label}): ${d.reasons.join(', ') || 'keine Besonderheit'}`);
-        }),
+        DIM_KEYS.map((k) => h('li', {}, reasonText(k, x))),
       ),
     ),
+  );
+}
+
+/** Leiste mit Info-Icons über der Stundenansicht: Wind, Thermik, Basis, Turbulenz, Scherung, Überhöhung */
+function infoBar(): HTMLElement {
+  const items: [InfoKey, string][] = [
+    ['wind', 'Wind'],
+    ['thermik', 'Thermik'],
+    ['basis', 'Basis'],
+    ['turbulenz', 'Turbulenz'],
+    ['scherung', 'Scherung'],
+    ['ueberhoehung', 'Überhöhung'],
+  ];
+  const tips = items.map(([key, label]) => ({ label, ...infoTip(key) }));
+  // nur eine Erklärung zugleich offen
+  for (const t of tips) {
+    t.button.addEventListener('click', () => {
+      for (const o of tips) {
+        if (o === t) continue;
+        o.panel.hidden = true;
+        o.button.setAttribute('aria-expanded', 'false');
+      }
+    });
+  }
+  return h(
+    'section',
+    { class: 'infobar', 'aria-label': 'Was die Werte bedeuten' },
+    h(
+      'div',
+      { class: 'infobar-row' },
+      h('span', { class: 'small' }, 'Was die Werte bedeuten:'),
+      tips.map((t) => h('span', { class: 'infochip' }, t.label, t.button)),
+    ),
+    tips.map((t) => t.panel),
+    h('p', { class: 'small' }, 'Wind steht als Grundwind/Böen in km/h. Schraffiert heißt: Quellwolken möglich, also keine reine Blauthermik, aber auch nicht zwingend geschlossene Bewölkung.'),
   );
 }
 
@@ -858,6 +1055,7 @@ function renderDetail(view: HTMLElement): void {
       h('p', { class: 'verdict' }, day.verdict),
       sun ? h('p', { class: 'sun' }, `Sonnenaufgang ${clockTime(sun.sunrise)} · Sonnenuntergang ${clockTime(sun.sunset)} Uhr`) : null,
     ),
+    infoBar(),
     h('div', { class: 'hours' }, ev.hours.filter((x) => x.isDay && x.time.startsWith(date)).map(hourRow)),
   );
 
@@ -992,9 +1190,9 @@ const weightText = (v: number) => (v === 0 ? 'egal' : v < 0.8 ? `niedrig (${num1
 type ReqKey = 'thermic_character_min' | 'wind_comfort_max' | 'shear_turbulence_max' | 'structure_cap_min';
 const REQ_LABELS: Record<ReqKey, string> = {
   thermic_character_min: 'Thermik mindestens',
-  structure_cap_min: 'Deckel mindestens',
+  structure_cap_min: 'Überhöhung mindestens',
   wind_comfort_max: 'Wind höchstens',
-  shear_turbulence_max: 'Scherung höchstens',
+  shear_turbulence_max: 'Turbulenz höchstens',
 };
 const REQ_DEFAULT: Record<ReqKey, number> = { thermic_character_min: 2, structure_cap_min: 2, wind_comfort_max: 3, shear_turbulence_max: 3 };
 
@@ -1035,7 +1233,8 @@ function zoneEditor(k: DimensionKey, summary: HTMLElement): HTMLElement {
     controls.set(level, { input, out });
     return h('div', { class: `slider lvl-${level}` }, h('label', { for: id }, h('span', {}, `${LEVEL_NAMES[level]} bis`), out), input);
   });
-  return h('div', { class: 'dimset' }, h('h4', {}, DIM_NAMES[k]), h('span', { class: 'hint' }, DIM_HINT[k]), h('div', { class: 'zwrap' }, scale, zoneTicks()), rows);
+  const infoKey: Record<DimensionKey, InfoKey> = { wind_comfort: 'wind', thermic_character: 'thermik', shear_turbulence: 'turbulenz', structure_cap: 'ueberhoehung' };
+  return h('div', { class: 'dimset' }, titledInfo('h4', DIM_NAMES[k], infoKey[k]), h('span', { class: 'hint' }, DIM_HINT[k]), h('div', { class: 'zwrap' }, scale, zoneTicks()), rows);
 }
 
 function characterBox(): HTMLElement {
@@ -1058,6 +1257,46 @@ function characterBox(): HTMLElement {
     h('p', {}, `${characterSummary(c, r)}. ${gearText(c)}.`),
     h('p', { class: 'small' }, `${created ? `Angelegt am ${created} ` : ''}Wenn sich deine Technik oder dein Gefühl in der Luft verändert, lies dich einfach neu ein.`),
     h('a', { class: 'btn', href: '#character' }, 'Character neu einlesen'),
+  );
+}
+
+/** Startbedingungen im Profil: dieselben Sperren wie im Character, damit niemand sich Rückenwind freischaltet, der dafür noch nicht erfahren genug ist */
+function launchBox(summary: HTMLElement): HTMLElement {
+  const r = characterResult();
+  const prefs = (state.pilot.launch ??= clone(launchPrefsOf(state.pilot)));
+  const changed = () => {
+    profileChanged(summary);
+    current.textContent = launchText(prefs);
+  };
+  const current = h('p', { class: 'small' }, launchText(prefs));
+  const rows: HTMLElement[] = [];
+  if (r?.crosswindUnlocked) {
+    rows.push(h('div', { class: 'q' }, h('h4', {}, 'Seitenwind tolerieren?'), choiceList('Seitenwind', CROSSWIND_OPTIONS, prefs.crosswind, (id) => ((prefs.crosswind = id), changed()))));
+  }
+  if (r?.tailwindUnlocked) {
+    rows.push(h('div', { class: 'q' }, h('h4', {}, 'Rückenwind tolerieren?'), choiceList('Rückenwind', TAILWIND_OPTIONS, prefs.tailwind, (id) => ((prefs.tailwind = id), changed()))));
+  }
+  rows.push(
+    h(
+      'div',
+      { class: 'q' },
+      h('h4', {}, 'Rückwärtsaufziehen sicher?'),
+      choiceList('Rückwärtsaufziehen', REVERSE_OPTIONS, prefs.reverseLaunch === undefined ? undefined : prefs.reverseLaunch ? 'yes' : 'no', (id) => ((prefs.reverseLaunch = id === 'yes'), changed())),
+    ),
+  );
+  return h(
+    'section',
+    { class: 'box' },
+    titledInfo('h3', 'Deine Startbedingungen', 'wind'),
+    h(
+      'p',
+      { class: 'small' },
+      r?.crosswindUnlocked
+        ? 'Stunden mit Seiten- oder Rückenwind, der nicht zu dir passt, zählen nie als Flugfenster. Rückenwind zeigt die App ohnehin nur im Modus Push.'
+        : 'Solange dein Character noch nicht als erfahren gilt (Technik ab „solide“, mindestens 20 Flüge im Jahr, mit dem System vertraut), zeigt die App keine Startfenster bei Seiten- oder Rückenwind.',
+    ),
+    rows,
+    current,
   );
 }
 
@@ -1147,17 +1386,24 @@ function renderProfile(view: HTMLElement): void {
   view.append(
     characterBox(),
     h('section', { class: 'box' }, h('h3', {}, 'Dein Modus heute'), modeButtons(), coachLine() ?? h('p', { class: 'small' }, `Als Flugfenster zählen ${MODE_ZONE_TEXT[mode]}.`), summary),
+    launchBox(summary),
     h(
       'section',
       { class: 'box' },
-      h('h3', {}, 'Deine Zonen'),
+      h('h3', {}, 'Deine Flug-Zonen'),
+      h('p', { class: 'coach' }, ZONES_HINT),
       h(
-        'p',
-        { class: 'small' },
-        'Für jede Dimension drei Grenzen: bis wohin du entspannt fliegst (Komfort), wo du bewusst wächst (Progress) und was du dir an XC-Tagen zumutest (Challenge). Darüber beginnt die Überforderung, die nie als Flugfenster zählt. In der Stundenansicht markiert ein Strich auf dem Balken die Grenze deines Modus.',
+        'details',
+        { class: 'zones-more' },
+        h('summary', {}, 'Zonen ansehen und anpassen'),
+        h(
+          'p',
+          { class: 'small' },
+          'Für jede Dimension drei Grenzen: bis wohin du entspannt fliegst (Komfort), wo du bewusst wächst (Progress) und was du dir an Push-Tagen zumutest (Challenge). Darüber beginnt die Überforderung, die nie als Flugfenster zählt. In der Stundenansicht markiert ein Strich auf dem Balken die Grenze deines Modus.',
+        ),
+        zoneLegend(),
+        DIM_KEYS.map((k) => zoneEditor(k, summary)),
       ),
-      zoneLegend(),
-      DIM_KEYS.map((k) => zoneEditor(k, summary)),
       state.pilot.character
         ? h(
             'button',
@@ -1185,15 +1431,15 @@ function renderProfile(view: HTMLElement): void {
         h(
           'p',
           { class: 'small' },
-          'Liegt eine Dimension über der Grenze deines Modus, zählt die Stunde nicht als Flugfenster. Die Gewichtung bestimmt, wie weit die Passung dann sinkt, und damit die Reihenfolge der Startplätze ohne Fenster.',
+          'Liegt eine Dimension über der Grenze deines Modus, zählt die Stunde nicht als Flugfenster. Die Gewichtung bestimmt, wie weit die Passung dann sinkt, und damit die Reihenfolge der Startplätze ohne Fenster. Skala: egal (0) bis hoch (×2).',
         ),
         weights,
         h('h4', {}, `Was ${GOAL_NAMES[mode]} mindestens braucht`),
-        h('p', { class: 'small' }, 'Reicht eine Stunde dafür nicht, kostet das 25 Punkte Passung. Haken weg heißt: wird nicht geprüft.'),
+        h('p', { class: 'small' }, 'Reicht eine Stunde dafür nicht, kostet das 25 Punkte Passung. Haken weg heißt: wird nicht geprüft. Skala 0 bis 5 wie bei den Zonen.'),
         h('div', { class: 'req' }, reqRows.flat()),
       ),
     ),
-    h('section', { class: 'box' }, h('p', { class: 'small' }, 'Character, Zonen und Modus werden nur auf diesem Gerät gespeichert.'), reset),
+    h('section', { class: 'box' }, h('p', { class: 'small' }, 'Character, Startbedingungen, Zonen und Modus werden nur auf diesem Gerät gespeichert.'), reset),
   );
 }
 
@@ -1204,19 +1450,47 @@ function renderProfile(view: HTMLElement): void {
 interface Draft {
   style?: FlightStyle;
   wing?: WingClass;
+  familiar?: Familiarity;
   currency?: Currency;
+  reverseLaunch?: boolean;
+  crosswind?: CrosswindTolerance;
+  tailwind?: TailwindTolerance;
   skills: Record<string, number>;
   safety: Record<string, number>;
 }
 
-const WIZARD_STEPS = ['Flugstil', 'Schirm und Flugpraxis', 'Technik', 'Sicherheitsgefühl', 'Ergebnis'];
+const WIZARD_STEPS = ['Flugstil', 'Schirm, Flugpraxis und Start', 'Technik', 'Sicherheitsgefühl', 'Ergebnis'];
+
+function draftAnswers(d: Draft): CharacterAnswers {
+  return {
+    style: d.style!,
+    wing: d.wing!,
+    familiar: d.familiar,
+    currency: d.currency!,
+    reverseLaunch: d.reverseLaunch,
+    crosswind: d.crosswind,
+    tailwind: d.tailwind,
+    skills: d.skills,
+    safety: d.safety,
+  };
+}
 const wizard = { step: 0, draft: null as Draft | null };
 
 function wizardDraft(): Draft {
   if (!wizard.draft) {
     const c = state.pilot.character;
     wizard.draft = c
-      ? { style: c.style, wing: c.wing, currency: c.currency, skills: { ...c.skills }, safety: { ...c.safety } }
+      ? {
+          style: normalizeStyle(c.style),
+          wing: c.wing,
+          familiar: c.familiar,
+          currency: c.currency,
+          reverseLaunch: c.reverseLaunch,
+          crosswind: c.crosswind,
+          tailwind: c.tailwind,
+          skills: { ...c.skills },
+          safety: { ...c.safety },
+        }
       : { skills: {}, safety: {} };
   }
   return wizard.draft;
@@ -1224,7 +1498,7 @@ function wizardDraft(): Draft {
 
 function openQuestions(step: number, d: Draft): number {
   if (step === 0) return d.style ? 0 : 1;
-  if (step === 1) return (d.wing ? 0 : 1) + (d.currency ? 0 : 1);
+  if (step === 1) return [d.wing, d.familiar, d.currency, d.reverseLaunch].filter((x) => x === undefined).length;
   if (step === 2) return SKILL_QUESTIONS.filter((q) => d.skills[q.id] === undefined).length;
   if (step === 3) return SAFETY_QUESTIONS.filter((q) => d.safety[q.id] === undefined).length;
   return 0;
@@ -1242,7 +1516,12 @@ function leaveWizard(target: string): void {
   location.hash = target;
 }
 
-function choiceList<T extends string>(label: string, options: { id: T; title: string; text?: string }[], value: T | undefined, onPick: (id: T) => void): HTMLElement {
+function choiceList<T extends string>(
+  label: string,
+  options: { id: T; title: string; subtitle?: string; text?: string }[],
+  value: T | undefined,
+  onPick: (id: T) => void,
+): HTMLElement {
   const buttons: HTMLElement[] = options.map((o) =>
     h(
       'button',
@@ -1255,7 +1534,7 @@ function choiceList<T extends string>(label: string, options: { id: T; title: st
           onPick(o.id);
         },
       },
-      h('b', {}, o.title),
+      h('b', {}, o.title, o.subtitle ? h('em', {}, `: ${o.subtitle}`) : null),
       o.text ? h('span', {}, o.text) : null,
     ),
   );
@@ -1304,32 +1583,72 @@ function scoreMeter(label: string, value: number, max: number, bands: number[], 
   );
 }
 
-function characterResultView(d: Draft): HTMLElement[] {
-  const answers: CharacterAnswers = { style: d.style!, wing: d.wing!, currency: d.currency!, skills: d.skills, safety: d.safety };
-  const r = scoreCharacter(answers);
-  return [
-    h('p', { class: 'lead' }, `Dein aktuelles Profil: ${characterSummary(answers, r)}. Dieses Profil bildet die Basis für deine persönlichen Komfort- und Challenge-Zonen.`),
-    h('div', { class: 'meters' }, scoreMeter('Technik', r.skillTotal, 50, [15, 30, 40], r.skillLabel), scoreMeter('Sicherheitsgefühl', r.safetyTotal, 40, [20, 30], r.safetyLabel)),
-    h('h3', {}, 'Deine Zonen'),
+function launchText(l: { crosswind: CrosswindTolerance; tailwind: TailwindTolerance; reverseLaunch?: boolean }): string {
+  const cw = { no: 'kein Seitenwind', light: 'leichter Seitenwind', yes: 'Seitenwind, soweit der Startplatz es hergibt' }[l.crosswind];
+  const tw = l.tailwind === 'light' ? 'leichter Rückenwind nur im Modus Push' : 'kein Rückenwind';
+  const rev =
+    l.reverseLaunch === true
+      ? 'Rückwärtsaufziehen sicher'
+      : l.reverseLaunch === false
+        ? `ohne Rückwärtsaufziehen kein Vorwärtsstart über ${LAUNCH_LIMITS.reverseRequiredKmh} km/h`
+        : 'Rückwärtsaufziehen nicht angegeben';
+  return `${capitalize(cw)}, ${tw}, ${rev}.`;
+}
+
+/** Die ausgeklappten Zonen: erst der Hinweis, dann Legende und Skalen */
+function zonesDetails(envelope: Record<DimensionKey, EnvelopeLimits>): HTMLElement {
+  return h(
+    'details',
+    { class: 'zones-more' },
+    h('summary', {}, 'Deine Flug-Zonen ansehen'),
     zoneLegend(),
     h(
       'div',
       { class: 'zlist' },
       DIM_KEYS.map((k) =>
-        h('div', { class: 'zrow' }, h('div', { class: 'zrow-head' }, h('b', {}, DIM_NAMES[k]), h('span', {}, limitsText(r.envelope[k]))), zoneScale(r.envelope[k]), zoneTicks()),
+        h('div', { class: 'zrow' }, h('div', { class: 'zrow-head' }, h('b', {}, DIM_NAMES[k]), h('span', {}, limitsText(envelope[k]))), zoneScale(envelope[k]), zoneTicks()),
       ),
     ),
-    h('h3', {}, 'Wie die Grenzen zustande kommen'),
-    h('ul', { class: 'plain' }, h('li', {}, `Grundlage ist die Starttabelle für deine Technik-Stufe „${r.skillLabel}“.`), r.adjustments.map((a) => h('li', {}, a))),
+  );
+}
+
+function characterResultView(d: Draft, update: () => void): HTMLElement[] {
+  const answers = draftAnswers(d);
+  const r = scoreCharacter(answers);
+  const launchQs: HTMLElement[] = [];
+  if (r.crosswindUnlocked) {
+    launchQs.push(
+      h('h3', {}, 'Deine Startbedingungen'),
+      h('p', { class: 'small' }, 'Du bist erfahren genug für diese Fragen. Ohne Antwort rechnet die App vorsichtig mit „nein“.'),
+      h('div', { class: 'q' }, h('h4', {}, 'Seitenwind tolerieren?'), choiceList('Seitenwind', CROSSWIND_OPTIONS, d.crosswind, (id) => ((d.crosswind = id), update()))),
+    );
+    if (r.tailwindUnlocked) {
+      launchQs.push(h('div', { class: 'q' }, h('h4', {}, 'Rückenwind tolerieren?'), choiceList('Rückenwind', TAILWIND_OPTIONS, d.tailwind, (id) => ((d.tailwind = id), update()))));
+    }
+  }
+  return [
+    h('p', { class: 'lead' }, `Dein aktuelles Profil: ${characterSummary(answers, r)}. Dieses Profil bildet die Basis für deine persönlichen Flug-Zonen.`),
+    h('div', { class: 'meters' }, scoreMeter('Technik', r.skillTotal, 50, [15, 30, 40], r.skillLabel), scoreMeter('Sicherheitsgefühl', r.safetyTotal, 40, [20, 30], r.safetyLabel)),
+    ...launchQs,
+    h('p', { class: 'small', id: 'launch-summary' }, `Startbedingungen: ${launchText(r.launch)}`),
     h(
       'p',
       { class: 'coach' },
       r.xcAdvised
-        ? 'XC passt zu deinem Character: An XC-Tagen zählen Stunden bis in deine Challenge-Zone.'
-        : `Für XC rechnet der Coach vorerst mit Progress. ${r.xcReason} Das ist keine Wertung, sondern deine Sicherheitsreserve.`,
+        ? 'Push passt zu deinem Character: An Push-Tagen zählen Stunden bis in deine Challenge-Zone.'
+        : `Für Push rechnet der Coach vorerst mit Flow. ${r.xcReason} Das ist keine Wertung, sondern deine Sicherheitsreserve.`,
     ),
-    h('p', {}, `Tagesmodus zum Start: ${GOAL_NAMES[r.defaultMode]}, passend zu deinem Flugstil. Du kannst ihn jeden Tag neu wählen.`),
-    state.pilot.comfort_profile.envelope ? h('p', { class: 'small' }, 'Übernehmen ersetzt deine bisherigen Zonen.') : null,
+    h('p', {}, `Tagesmodus zum Start: ${GOAL_NAMES[r.defaultMode]}, passend zu deinem Flugstil. Du kannst ihn jeden Tag neu wählen. Der Flugstil verschiebt nie deine Grenzen, die kommen nur aus Technik, Sicherheitsgefühl, Schirm und Flugpraxis.`),
+    h('h3', {}, 'Deine Flug-Zonen'),
+    h('p', { class: 'coach' }, ZONES_HINT),
+    zonesDetails(r.envelope),
+    h(
+      'details',
+      { class: 'zones-more' },
+      h('summary', {}, 'Wie die Grenzen zustande kommen'),
+      h('ul', { class: 'plain' }, h('li', {}, `Grundlage ist die Starttabelle für deine Technik-Stufe „${r.skillLabel}“.`), r.adjustments.map((a) => h('li', {}, a))),
+    ),
+    state.pilot.comfort_profile.envelope ? h('p', { class: 'small' }, 'Übernehmen ersetzt deine bisherigen Zonen und Startbedingungen.') : null,
   ].filter((x): x is HTMLElement => x !== null);
 }
 
@@ -1359,15 +1678,34 @@ function renderCharacter(view: HTMLElement): void {
       h(
         'p',
         { class: 'lead' },
-        'Fünf kurze Schritte, etwa zwei Minuten. Aus deinen Antworten berechnet die App deine persönlichen Zonen: grün Komfort, gelb Progress, orange Challenge und rot Überforderung. Ehrliche Antworten helfen dir mehr als gute, und alles bleibt auf diesem Gerät.',
+        'Fünf kurze Schritte, etwa zwei Minuten. Aus deinen Antworten berechnet die App deine persönlichen Zonen: grün Komfort, gelb Progress, orange Challenge und rot Überforderung.',
+      ),
+      h(
+        'p',
+        { class: 'lead' },
+        'Hier geht’s um dich als Pilot:in: wer du bist und wie du dich fühlst. Ehrliche Antworten bringen dich länger weiter :) Alles bleibt auf diesem Gerät und kann immer verändert werden.',
       ),
       question('Welcher Flugstil beschreibt dich aktuell am besten?', choiceList('Flugstil', STYLE_OPTIONS, d.style, (id) => ((d.style = id), update())), () => !!d.style),
     ];
   } else if (step === 1) {
     body = [
       question('Welche Schirmklasse fliegst du gerade?', choiceList('Schirmklasse', WING_OPTIONS, d.wing, (id) => ((d.wing = id), update())), () => !!d.wing),
+      question(
+        'Ich bin mit meinem System vertraut und sicher.',
+        choiceList('Mit dem System vertraut', FAMILIAR_OPTIONS, d.familiar, (id) => ((d.familiar = id), update())),
+        () => !!d.familiar,
+      ),
       question('Wie oft fliegst du?', choiceList('Flüge pro Jahr', CURRENCY_OPTIONS, d.currency, (id) => ((d.currency = id), update())), () => !!d.currency),
-      h('p', { class: 'small' }, 'Schirmklasse und Flugpraxis verschieben deine Grenzen ein wenig, vor allem beim Wind.'),
+      question(
+        'Ziehst du sicher rückwärts auf?',
+        choiceList('Rückwärtsaufziehen', REVERSE_OPTIONS, d.reverseLaunch === undefined ? undefined : d.reverseLaunch ? 'yes' : 'no', (id) => ((d.reverseLaunch = id === 'yes'), update())),
+        () => d.reverseLaunch !== undefined,
+      ),
+      h(
+        'p',
+        { class: 'small' },
+        `Schirmklasse, Vertrautheit und Flugpraxis verschieben deine Grenzen ein wenig, vor allem beim Wind. Ab etwa ${LAUNCH_LIMITS.reverseHintKmh} km/h ist Rückwärtsaufziehen die sicherere Startmethode; ohne empfiehlt die App über ${LAUNCH_LIMITS.reverseRequiredKmh} km/h keinen Vorwärtsstart.`,
+      ),
     ];
   } else if (step === 2) {
     body = [
@@ -1388,7 +1726,11 @@ function renderCharacter(view: HTMLElement): void {
       }),
     ];
   } else {
-    body = characterResultView(d);
+    // Antworten zu Seiten- und Rückenwind aktualisieren die Zusammenfassung sofort
+    body = characterResultView(d, () => {
+      const el = document.getElementById('launch-summary');
+      if (el) el.textContent = `Startbedingungen: ${launchText(scoreCharacter(draftAnswers(d)).launch)}`;
+    });
   }
 
   const last = step === WIZARD_STEPS.length - 1;
@@ -1403,7 +1745,7 @@ function renderCharacter(view: HTMLElement): void {
       class: 'btn primary',
       onclick: () => {
         if (last) {
-          applyCharacter({ style: d.style!, wing: d.wing!, currency: d.currency!, skills: d.skills, safety: d.safety });
+          applyCharacter(draftAnswers(d));
           state.flash = `Character übernommen. Die Flugfenster zeigen jetzt deine persönlichen Zonen im Modus ${GOAL_NAMES[effectiveMode()]}.`;
           leaveWizard('fenster');
           return;
@@ -1493,7 +1835,7 @@ function renderInfo(view: HTMLElement): void {
         {},
         h('li', {}, 'Komfort: Bedingungen, in denen du entspannt und sicher fliegst.'),
         h('li', {}, 'Progress: etwas über deiner Komfortzone, gut zum bewussten Lernen.'),
-        h('li', {}, 'Challenge: anspruchsvoll, für XC-Tage mit klarer Sicherheitsstrategie.'),
+        h('li', {}, 'Challenge: anspruchsvoll, für Push-Tage mit klarer Sicherheitsstrategie.'),
         h('li', {}, 'Überforderung: über deinen Grenzen. Zählt nie als Flugfenster.'),
         h('li', {}, 'No-Go: feste Regeln, unabhängig von dir: Nacht, Niederschlag, Nebel, Start in der Wolke, zu viel Wind oder Böen, falsche Windrichtung, Lee, Auflagen des Geländes oder zu heftige Bedingungen.'),
       ),
@@ -1506,11 +1848,11 @@ function renderInfo(view: HTMLElement): void {
       h(
         'ul',
         {},
-        h('li', {}, 'Chill: Fokus auf Aussicht, saubere Starts und Landungen. Als Flugfenster zählen nur Stunden in deiner Komfort-Zone.'),
-        h('li', {}, 'Progress: bewusst ein Stück wachsen, mit klaren Lernzielen. Es zählen Stunden bis in deine Progress-Zone.'),
-        h('li', {}, 'XC: weiter fliegen mit klarer Sicherheitsstrategie. Es zählen Stunden bis in deine Challenge-Zone.'),
+        h('li', {}, `Chill: ${GOAL_LONG.chill} Als Flugfenster zählen nur Stunden in deiner Komfort-Zone.`),
+        h('li', {}, `Flow: ${GOAL_LONG.progress} Es zählen Stunden bis in deine Progress-Zone.`),
+        h('li', {}, `Push: ${GOAL_LONG.xc} Es zählen Stunden bis in deine Challenge-Zone. Blauthermik gilt dabei nicht automatisch als gut, die App weist darauf hin.`),
       ),
-      h('p', { class: 'small' }, 'Solange dein Technik-Score unter 31 von 50 oder dein Sicherheits-Score unter 21 von 40 liegt, rechnet der Coach XC als Progress.'),
+      h('p', { class: 'small' }, 'Die Modi beschreiben die Flug- und Entscheidungslage, nicht dein Können. Solange dein Technik-Score unter 31 von 50 oder dein Sicherheits-Score unter 21 von 40 liegt, rechnet der Coach Push als Flow.'),
     ),
     h(
       'section',
@@ -1525,19 +1867,23 @@ function renderInfo(view: HTMLElement): void {
     h(
       'section',
       { class: 'box' },
-      h('h3', {}, 'Die vier Dimensionen (0 bis 5)'),
-      h(
-        'ul',
-        {},
-        h('li', {}, 'Wind: Wind in Starthöhe. 1 = 5 km/h, 2 = 10, 3 = 15, 4 = 22, 5 = ab 30 km/h. Mehr Wind oben oder kräftige Böen heben die Stufe.'),
-        h('li', {}, 'Thermik: aus Einstrahlung und Höhe der Thermikschicht. 1 schwach und flach, 3 gut nutzbar, 4 kräftig, 5 Überentwicklung.'),
-        h('li', {}, 'Scherung: Windscherung, Böen, Wind im Verhältnis zur Thermik, Lee. 1 ruhig, 3 bewegt, 4 ruppig.'),
-        h('li', {}, 'Deckel: nutzbare Höhe über dem Start bis Thermikobergrenze oder Basis. 1 etwa 350 m, 2 700 m, 3 1200 m, 4 über 2000 m.'),
-      ),
+      h('h3', {}, 'Die vier Dimensionen'),
       h(
         'p',
         { class: 'small' },
-        'Unterstufen: „2−“ ist knapp unter 2, „2+“ knapp darüber. Passung: 100, wenn alle vier Dimensionen in der Zone deines Modus liegen, 75, wenn es für den Modus nicht ganz reicht (zum Beispiel zu wenig Thermik für XC). Liegt eine Dimension darüber, bleibt die Passung unter 50, bei Überforderung unter 20. Ab 60 zählt eine Stunde zum Flugfenster.',
+        'Angezeigt werden echte Werte: Wind als Grundwind/Böen in km/h, Thermik als geschätztes Steigen, Turbulenz als Wort, Überhöhung in Metern über dem Start. Intern rechnet die App jede Dimension auf einer Skala von 0 bis 5; die brauchst du nur für die Zonen-Grenzen.',
+      ),
+      ...titledInfo('h4', 'Wind', 'wind'),
+      ...titledInfo('h4', 'Thermik', 'thermik'),
+      ...titledInfo('h4', 'Basis', 'basis'),
+      ...titledInfo('h4', 'Turbulenz / Scherung', 'turbulenz'),
+      ...titledInfo('h4', 'Windscherung', 'scherung'),
+      ...titledInfo('h4', 'Mögliche Überhöhung / Deckel', 'ueberhoehung'),
+      ...titledInfo('h4', 'Inversion', 'inversion'),
+      h(
+        'p',
+        { class: 'small' },
+        'Passung: 100, wenn alle vier Dimensionen in der Zone deines Modus liegen, 75, wenn es für den Modus nicht ganz reicht (zum Beispiel zu wenig Thermik für Push). Liegt eine Dimension darüber oder passt der Start nicht zu deinen Startbedingungen, bleibt die Passung unter 50, bei Überforderung unter 20. Ab 60 zählt eine Stunde zum Flugfenster.',
       ),
     ),
     h(

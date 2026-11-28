@@ -1,6 +1,6 @@
 # Flugwetter-Prototyp: Wetter-Engine, Handy-App und Character (Schritte 1 bis 3)
 
-Die Engine bewertet für jeden Startplatz Stunde für Stunde, wie die Luft sein wird und ob das zu dir passt. Die Handy-App (Schritt 2) zeigt diese Bewertung als Flugfenster an. Schritt 3 ergänzt den Character: ein kurzer Fragebogen, aus dem persönliche Zonen (Komfort, Progress, Challenge, Überforderung) entstehen, und den Tagesmodus Chill, Progress oder XC. Als Nächstes sind Tagescheck (Mental- und Reality-Check), Flugtagebuch mit Lernschleife und Community geplant.
+Die Engine bewertet für jeden Startplatz Stunde für Stunde, wie die Luft sein wird und ob das zu dir passt. Die Handy-App (Schritt 2) zeigt diese Bewertung als Flugfenster an. Schritt 3 ergänzt den Character: ein kurzer Fragebogen, aus dem persönliche Zonen (Komfort, Progress, Challenge, Überforderung) entstehen, und den Tagesmodus Chill, Flow oder Push (bis Schritt 3 hießen sie Chill, Progress und XC). Seit Marvins Änderungskonzept berücksichtigt der Character auch Startbedingungen (Seiten- und Rückenwind, Rückwärtsaufziehen); was umgesetzt ist, welche Annahmen gelten und was zurückgestellt ist, steht in [`docs/aenderungskonzept.md`](docs/aenderungskonzept.md). Als Nächstes sind Tagescheck (Mental- und Reality-Check), Flugtagebuch mit Lernschleife und Community geplant.
 
 Enthalten sind 13 Startplätze an 8 frequentierten Geländen im Schwarzwald, jede Startrichtung einzeln: Oppenau Rossbühl (West) und Schäfersfeld (Ost), Merkur (West, Nordost), Teufelsmühle (West, Nordwest), Gschasi, Kandel (West mit Rampe, Süd), Schauinsland und Hochblauen (Südwest, Ost, Nord). Die Startplätze eines Geländes teilen sich eine Vorhersage.
 
@@ -13,22 +13,23 @@ Enthalten sind 13 Startplätze an 8 frequentierten Geländen im Schwarzwald, jed
    - Thermikstärke w* aus Einstrahlung und Höhe der Thermikschicht, daraus ein geschätztes Steigen
    - Thermik-Index in der Flugschicht und auf 850 hPa, Inversionen über der Thermik
    - Windscherung (m/s pro km), Böen gegen den Grundwind, Böenfaktor, CAPE
-3. **Vier Dimensionen von 0 bis 5 mit Unterstufen** (z. B. „2+“): Windkomfort, Thermik-Charakter, Scherung/Turbulenz, Struktur/Deckel. Jede Bewertung kommt mit Begründung.
+3. **Vier Dimensionen von 0 bis 5 mit Unterstufen** (z. B. „2+“): Windkomfort, Thermik-Charakter, Turbulenz / Scherung, Mögliche Überhöhung / Deckel. Jede Bewertung kommt mit Begründung. Die App zeigt statt der Stufen echte Werte (Grundwind/Böen in km/h, Steigen, Überhöhung in m); Höhen aus dem Modell sind auf 100 m gerundet (`src/format.ts`).
 4. **No-Go-Regeln:** Nacht, Niederschlag, Gewitter, Nebel, Start in der Wolke, Basis knapp über dem Start, zu viel Wind oder Böen, Wind aus falscher Richtung (ab 8 km/h, bei Starts im Wald ab 5 km/h, direkter Rückenwind schon ab 5 km/h), Höhenwind von hinten (Lee), Flugzeiten aus Geländeauflagen (z. B. Oppenau: frühestens 2 h nach Sonnenaufgang) und Gefahrenregeln pro Gelände. Hinweise gibt es außerdem bei Waldstarts ohne klaren Gegenwind und wenn die Thermik in kontrollierten Luftraum reicht (Hochblauen: Luftraum D Basel ab 1676 m).
 5. **Lufttyp:** ruhig, lebhaft, Streckenwetter oder No-Go, mit Zusatz wie „Soaring im Wind“ oder „sportlich“. Er beschreibt die Luft unabhängig vom Piloten (im Code `zone`: `chill`, `progress`, `xc`, `no-go`).
 6. **Persönliche Zone** (`src/profile.ts`): Jede Dimension liegt gemessen an deinen drei Grenzen in grün (Komfort), gelb (Progress), orange (Challenge) oder rot (Überforderung). Die anspruchsvollste Dimension bestimmt die Zone der Stunde, die No-Go-Regeln gelten unabhängig davon.
-7. **Passung (0 bis 100) im Tagesmodus:** Chill zählt bis grün, Progress bis gelb, XC bis orange, rot zählt nie. 100, wenn alles in der Zone des Modus liegt, minus 25, wenn die Mindestanforderungen des Modus nicht erfüllt sind (z. B. zu wenig Thermik für XC). Liegt die Stunde über dem Modus, bleibt die Passung unter 50, bei rot unter 20.
-8. **Flugfenster pro Tag:** zusammenhängende Stunden ab Passung 60, mit der anspruchsvollsten Zone darin, plus die häufigsten Gründe gegen das Fliegen.
+7. **Startbedingungen** (`launchCheck` in `src/profile.ts`): Passt Seiten- oder Rückenwind nicht zum Character, oder liegt der Gegenwind ohne Rückwärtsaufziehen über 25 km/h, wird die Stunde rot und zählt nie als Flugfenster. Ohne Character gilt: kein Seiten-, kein Rückenwind.
+8. **Passung (0 bis 100) im Tagesmodus:** Chill zählt bis grün, Flow bis gelb, Push bis orange, rot zählt nie. 100, wenn alles in der Zone des Modus liegt, minus 25, wenn die Mindestanforderungen des Modus nicht erfüllt sind (z. B. zu wenig Thermik für XC). Liegt die Stunde über dem Modus, bleibt die Passung unter 50, bei rot unter 20.
+9. **Flugfenster pro Tag:** zusammenhängende Stunden ab Passung 60, mit der anspruchsvollsten Zone darin, plus die häufigsten Gründe gegen das Fliegen.
 
 ## Character und persönliche Zonen (Schritt 3)
 
 Der Fragebogen folgt dem Flow-Entwurf `paragliding_weather_pilot_check_v2` (`src/character.ts`):
 
-1. Flugstil (Genussflieger, Community, Landschaft, entwicklungsorientiert, Hike & Fly). Entwicklungsorientiert startet im Modus Progress, alle anderen in Chill.
-2. Schirmklasse (EN-A bis D) und Flüge pro Jahr (unter 20, 20 bis 50, über 50)
+1. Flugstil, sechs Typen: Butter (Genuss), Kaffee oder Tee (Community), Pralinenschachtel (Landschaft), Erdnussbutter (entwicklungsorientiert), Dreiecksbrötchen (Strecke), Snack (Hike & Fly). Der Stil setzt nur den Tagesmodus zum Start (Butter, Kaffee, Snack: Chill; Pralinen, Erdnussbutter: Flow; Dreiecksbrötchen: Push, falls der Character es hergibt), nie die Grenzen.
+2. Schirmklasse (EN-A bis D), „mit meinem System vertraut und sicher“ (ja, teilweise, noch nicht), Flüge oder Stunden pro Jahr (unter 20, 20 bis 50, über 50) und Rückwärtsaufziehen (ja/nein)
 3. Technik: 10 Fähigkeiten, je 0 bis 5. Summe 0 bis 50, Stufen bis 15 Grundlagenaufbau, bis 30 sichere Basis, bis 40 solide, darüber hohe Souveränität
 4. Sicherheitsgefühl: 8 Aussagen, je 0 bis 5. Summe 0 bis 40, Stufen bis 20 erhöhtes Stressniveau, bis 30 wechselnd, darüber stabil
-5. Ergebnis mit Zonen und Begründung
+5. Ergebnis: für erfahrene Piloten die Fragen nach Seiten- und Rückenwind, dann der Hinweis zu den Flug-Zonen; die Zonen selbst sind eingeklappt
 
 Die Technik-Stufe wählt eine Zeile der Starttabelle (Komfort / Progress / Challenge auf der Skala der Dimensionen):
 
@@ -39,7 +40,9 @@ Die Technik-Stufe wählt eine Zeile der Starttabelle (Komfort / Progress / Chall
 | solide | 2,5 / 3 / 3,5 | 2,5 / 3,5 / 4 | 2 / 2,5 / 3 | 4 / 4,5 / 5 |
 | hohe Souveränität | 3 / 3,5 / 4 | 3 / 4 / 4,5 | 2 / 3 / 3,5 | 4,5 / 5 / 5 |
 
-Zu- und Abschläge: erhöhtes Stressniveau −0,5 auf Wind, Thermik und Scherung; wechselndes Sicherheitsgefühl −0,25 auf Wind und Scherung; EN-A −0,5 Wind; EN-C +0,25 und EN-D +0,5 Wind, aber nur ab solider Technik und nie bei der Scherung; unter 20 Flüge im Jahr −0,25 auf Wind, Thermik und Scherung. Zusammen gehen die Grenzen nie unter die Zeile „Grundlagenaufbau“. XC empfiehlt der Coach erst ab solider Technik (31 von 50) und ohne erhöhtes Stressniveau (21 von 40), sonst rechnet er XC als Progress.
+Zu- und Abschläge: erhöhtes Stressniveau −0,5 auf Wind, Thermik und Scherung; wechselndes Sicherheitsgefühl −0,25 auf Wind und Scherung; EN-A −0,5 Wind; EN-C +0,25 und EN-D +0,5 Wind, aber nur ab solider Technik und nie bei der Scherung; unter 20 Flüge im Jahr −0,25 auf Wind, Thermik und Scherung; mit dem System nur teilweise vertraut: kein Zuschlag für EN-C/D; noch nicht vertraut: zusätzlich −0,25 auf Wind und Scherung. Zusammen gehen die Grenzen nie unter die Zeile „Grundlagenaufbau“. Push empfiehlt der Coach erst ab solider Technik (31 von 50) und ohne erhöhtes Stressniveau (21 von 40), sonst rechnet er Push als Flow.
+
+Startbedingungen: Die Frage nach Seitenwind erscheint ab solider Technik, mindestens 20 Flügen im Jahr, vertrautem System und ohne erhöhtes Stressniveau; die nach Rückenwind nur bei hoher Technik, über 50 Flügen, vertrautem System und stabilem Sicherheitsgefühl. Gesperrte Fragen zählen als „nein“. Grenzen (`LAUNCH_LIMITS`): Rückenwind ab 2 km/h Anteil; Wind von außerhalb des Windfensters bei „leicht“ bis 5 km/h; Seitenwind-Anteil innerhalb des Windfensters bei „nein“ ab 8, bei „leicht“ ab 12 km/h; Rückenwind „leicht“ gilt nur im Modus Push und bis zur festen Grenze von 5 km/h.
 
 Die Tabelle ist ein Startvorschlag und noch nicht an echten Flügen geeicht. Im Profil lassen sich alle Grenzen von Hand verstellen. Character, Zonen und Modus bleiben auf dem Gerät (`localStorage`, Schlüssel `flugwetter.profil.v2`; ein Profil aus Schritt 2 unter `…v1` wird übernommen und nicht verändert).
 

@@ -16,18 +16,19 @@ import {
   type SafetyLevel,
   type SkillLevel,
   type WingClass,
+  normalizeStyle,
 } from '../src/character.ts';
-import { dimensionZone, personalFit, personalZone } from '../src/profile.ts';
+import { DEFAULT_LAUNCH, dimensionZone, launchCheck, personalFit, personalZone } from '../src/profile.ts';
 import { summarizeDays } from '../src/windows.ts';
 import { DEFAULT_CONFIG } from '../src/config.ts';
-import type { DimensionKey, DimensionScore, Goal, HourEvaluation, PilotProfile } from '../src/types.ts';
+import type { DimensionKey, DimensionScore, Goal, HourEvaluation, HourMetrics, PilotProfile } from '../src/types.ts';
 import { loadPilot } from './helpers.ts';
 
 const DIMS: DimensionKey[] = ['wind_comfort', 'thermic_character', 'shear_turbulence', 'structure_cap'];
 
 function answers(skill: number, safety: number, extra: Partial<CharacterAnswers> = {}): CharacterAnswers {
   return {
-    style: 'progress',
+    style: 'learner',
     wing: 'B',
     currency: 'mid',
     skills: Object.fromEntries(SKILL_QUESTIONS.map((q) => [q.id, skill])),
@@ -126,13 +127,107 @@ test('Höhere Schirmklasse gibt nur mit solider Technik mehr Wind, nie mehr Turb
   assert.equal(solidD.shear_turbulence.challenge, solidB.shear_turbulence.challenge);
 });
 
-test('XC empfiehlt der Coach erst ab solider Technik und ohne erhöhtes Stressniveau', () => {
+test('Push empfiehlt der Coach erst ab solider Technik und ohne erhöhtes Stressniveau', () => {
   assert.equal(scoreCharacter(answers(2, 4)).xcAdvised, false);
   assert.match(scoreCharacter(answers(2, 4)).xcReason, /31/);
   assert.equal(scoreCharacter(answers(4, 2)).xcAdvised, false);
   assert.equal(scoreCharacter(answers(4, 4)).xcAdvised, true);
-  assert.equal(scoreCharacter(answers(4, 4, { style: 'relaxed' })).defaultMode, 'chill');
+  assert.equal(scoreCharacter(answers(4, 4, { style: 'butter' })).defaultMode, 'chill');
   assert.equal(scoreCharacter(answers(4, 4)).defaultMode, 'progress');
+  // Punktesammler startet in Push, aber nur, wenn der Character es hergibt
+  assert.equal(scoreCharacter(answers(4, 4, { style: 'xc' })).defaultMode, 'xc');
+  assert.equal(scoreCharacter(answers(2, 4, { style: 'xc' })).defaultMode, 'progress');
+});
+
+test('Flugstile aus Schritt 3 werden auf die neuen Typen abgebildet', () => {
+  assert.equal(normalizeStyle('relaxed'), 'butter');
+  assert.equal(normalizeStyle('scenery'), 'explorer');
+  assert.equal(normalizeStyle('progress'), 'learner');
+  assert.equal(normalizeStyle('hikefly'), 'hikefly');
+  assert.equal(normalizeStyle('unbekannt'), 'butter');
+});
+
+test('Flugstil verschiebt nie die Grenzen', () => {
+  const a = scoreCharacter(answers(4, 4, { style: 'butter' })).envelope;
+  const b = scoreCharacter(answers(4, 4, { style: 'xc' })).envelope;
+  assert.deepEqual(a, b);
+});
+
+test('Nicht vertraut mit dem System: kein Zuschlag für EN-C/D, ganz neu sogar vorsichtiger', () => {
+  const sure = buildEnvelope('solid', 'stable', 'D', 'mid', 'yes').envelope;
+  const partly = buildEnvelope('solid', 'stable', 'D', 'mid', 'partly').envelope;
+  const no = buildEnvelope('solid', 'stable', 'D', 'mid', 'no').envelope;
+  const plainB = buildEnvelope('solid', 'stable', 'B', 'mid').envelope;
+  assert.ok(sure.wind_comfort.progress > partly.wind_comfort.progress);
+  assert.deepEqual(partly.wind_comfort, plainB.wind_comfort);
+  assert.ok(no.wind_comfort.progress < partly.wind_comfort.progress);
+  assert.ok(no.shear_turbulence.progress < partly.shear_turbulence.progress);
+});
+
+test('Fragen zu Seiten- und Rückenwind gibt es erst für erfahrene Piloten', () => {
+  // wenig Technik: Antworten werden ignoriert, es bleibt bei nein
+  const novice = scoreCharacter(answers(2, 4, { crosswind: 'yes', tailwind: 'light' }));
+  assert.equal(novice.crosswindUnlocked, false);
+  assert.deepEqual([novice.launch.crosswind, novice.launch.tailwind], ['no', 'no']);
+  // solide, 20 bis 50 Flüge: Seitenwind ja, Rückenwind noch nicht
+  const solid = scoreCharacter(answers(4, 4, { familiar: 'yes', crosswind: 'light', tailwind: 'light' }));
+  assert.equal(solid.crosswindUnlocked, true);
+  assert.equal(solid.tailwindUnlocked, false);
+  assert.deepEqual([solid.launch.crosswind, solid.launch.tailwind], ['light', 'no']);
+  // sehr erfahren: beides
+  const pro = scoreCharacter(answers(5, 5, { familiar: 'yes', currency: 'high', crosswind: 'yes', tailwind: 'light' }));
+  assert.equal(pro.tailwindUnlocked, true);
+  assert.deepEqual([pro.launch.crosswind, pro.launch.tailwind], ['yes', 'light']);
+  // nicht vertraut mit dem System sperrt beides
+  assert.equal(scoreCharacter(answers(5, 5, { familiar: 'partly', currency: 'high' })).crosswindUnlocked, false);
+});
+
+function launchMetrics(over: Partial<HourMetrics>): HourMetrics {
+  const base = { takeoffWindKmh: 0, takeoffWindDir: 270, takeoffInSector: true, headwindKmh: 0, crosswindKmh: 0, cloudBaseMsl: 1800, workingHeight: 800 };
+  return { ...base, ...over } as HourMetrics;
+}
+
+test('Startbedingungen: Rückenwind nur sehr erfahren und nur im Modus Push', () => {
+  const tail = launchMetrics({ takeoffWindKmh: 4, headwindKmh: -4, takeoffInSector: false });
+  assert.equal(launchCheck(tail, { crosswind: 'yes', tailwind: 'no' }, 'xc').issues.length, 1);
+  assert.equal(launchCheck(tail, { crosswind: 'yes', tailwind: 'light' }, 'progress').issues.length, 1);
+  assert.match(launchCheck(tail, { crosswind: 'yes', tailwind: 'light' }, 'progress').issues[0], /Push/);
+  assert.equal(launchCheck(tail, { crosswind: 'yes', tailwind: 'light' }, 'xc').issues.length, 0);
+  // Windstille ist nie ein Problem
+  assert.equal(launchCheck(launchMetrics({ takeoffWindKmh: 2, headwindKmh: -2 }), DEFAULT_LAUNCH, 'chill').issues.length, 0);
+});
+
+test('Startbedingungen: Seitenwind je nach Toleranz', () => {
+  const outside = launchMetrics({ takeoffWindKmh: 4, headwindKmh: 0.5, crosswindKmh: 4, takeoffInSector: false });
+  assert.equal(launchCheck(outside, DEFAULT_LAUNCH, 'chill').issues.length, 1);
+  assert.equal(launchCheck(outside, { crosswind: 'light', tailwind: 'no' }, 'chill').issues.length, 0);
+  const outside6 = launchMetrics({ takeoffWindKmh: 6, headwindKmh: 1, crosswindKmh: 6, takeoffInSector: false });
+  assert.equal(launchCheck(outside6, { crosswind: 'light', tailwind: 'no' }, 'chill').issues.length, 1);
+  assert.equal(launchCheck(outside6, { crosswind: 'yes', tailwind: 'no' }, 'chill').issues.length, 0);
+  // im Windfenster, aber schräg: Seitenwind-Anteil 9 km/h
+  const oblique = launchMetrics({ takeoffWindKmh: 13, headwindKmh: 9, crosswindKmh: 9 });
+  assert.equal(launchCheck(oblique, DEFAULT_LAUNCH, 'chill').issues.length, 1);
+  assert.equal(launchCheck(oblique, { crosswind: 'light', tailwind: 'no' }, 'chill').issues.length, 0);
+});
+
+test('Startbedingungen: ohne Rückwärtsaufziehen kein Vorwärtsstart über 25 km/h', () => {
+  const strong = launchMetrics({ takeoffWindKmh: 26, headwindKmh: 26 });
+  assert.equal(launchCheck(strong, { ...DEFAULT_LAUNCH, reverseLaunch: false }, 'progress').issues.length, 1);
+  assert.equal(launchCheck(strong, { ...DEFAULT_LAUNCH, reverseLaunch: true }, 'progress').issues.length, 0);
+  const fresh = launchMetrics({ takeoffWindKmh: 12, headwindKmh: 12 });
+  assert.equal(launchCheck(fresh, { ...DEFAULT_LAUNCH, reverseLaunch: false }, 'progress').issues.length, 0);
+  assert.equal(launchCheck(fresh, { ...DEFAULT_LAUNCH, reverseLaunch: false }, 'progress').hints.length, 1);
+});
+
+test('Passt der Start nicht, zählt die Stunde nie als Flugfenster', () => {
+  const pilot = withMode(loadPilot(), 'progress');
+  pilot.launch = { crosswind: 'no', tailwind: 'no' };
+  const m = launchMetrics({ takeoffWindKmh: 4, headwindKmh: 0.5, crosswindKmh: 4, takeoffInSector: false });
+  const fit = personalFit(dims(1, 2, 1, 3), 'progress', [], pilot, m);
+  assert.equal(fit.personalZone, 'red');
+  assert.ok(fit.score < DEFAULT_CONFIG.windowMinFit);
+  assert.equal(fit.label, 'Start passt nicht zu dir');
+  assert.equal(fit.launchIssues.length, 1);
 });
 
 test('Alte Einzelgrenze wird zur Progress-Grenze, Komfort und Challenge eine halbe Stufe daneben', () => {

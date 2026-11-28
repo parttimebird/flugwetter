@@ -4,9 +4,15 @@
 // Fragen und Bänder folgen Marvins Flow-Entwurf (paragliding_weather_pilot_check_v2). Die Starttabelle und die Zu- und
 // Abschläge sind Startwerte zum Nachjustieren; das Flugtagebuch (Schritt 5) soll sie später pro Pilot anpassen.
 
-import type { DimensionKey, EnvelopeLimits, Goal } from './types.ts';
+import type { CrosswindTolerance, DimensionKey, EnvelopeLimits, Goal, LaunchPrefs, TailwindTolerance } from './types.ts';
 
-export type FlightStyle = 'relaxed' | 'community' | 'scenery' | 'progress' | 'hikefly';
+/**
+ * Flugstil: was du am Fliegen suchst. Er bestimmt den Tagesmodus zum Start und welche Luft dir gefällt, aber nie deine
+ * Grenzen. Die kommen nur aus Technik, Sicherheitsgefühl, Schirm und Flugpraxis („Wollen verschiebt kein Können“).
+ */
+export type FlightStyle = 'butter' | 'community' | 'explorer' | 'learner' | 'xc' | 'hikefly';
+/** Mit dem eigenen Schirm vertraut und sicher? */
+export type Familiarity = 'yes' | 'partly' | 'no';
 export type WingClass = 'A' | 'B' | 'C' | 'D';
 /** Flüge pro Jahr: unter 20, 20 bis 50, über 50 */
 export type Currency = 'low' | 'mid' | 'high';
@@ -17,7 +23,15 @@ export type Envelope = Record<DimensionKey, EnvelopeLimits>;
 export interface CharacterAnswers {
   style: FlightStyle;
   wing: WingClass;
+  /** mit dem System (Schirm und Gurtzeug) vertraut und sicher; fehlt bei Profilen aus Schritt 3, zählt dann als „ja“ */
+  familiar?: Familiarity;
   currency: Currency;
+  /** Rückwärtsaufziehen sicher; fehlt bei Profilen aus Schritt 3 */
+  reverseLaunch?: boolean;
+  /** nur gefragt, wenn der Character erfahren genug ist (crosswindUnlocked) */
+  crosswind?: CrosswindTolerance;
+  /** nur gefragt, wenn der Character sehr erfahren ist (tailwindUnlocked) */
+  tailwind?: TailwindTolerance;
   /** Selbsteinschätzung 0 bis 5 je Fähigkeit (Schlüssel aus SKILL_QUESTIONS) */
   skills: Record<string, number>;
   /** Zustimmung 0 bis 5 je Aussage (Schlüssel aus SAFETY_QUESTIONS) */
@@ -26,12 +40,79 @@ export interface CharacterAnswers {
   createdAt?: string;
 }
 
-export const STYLE_OPTIONS: { id: FlightStyle; title: string; text: string }[] = [
-  { id: 'relaxed', title: 'Entspannter Genussflieger', text: 'Du magst ruhige, gut einschätzbare Bedingungen und konzentrierst dich gern auf sauberes Fliegen und Aussicht.' },
-  { id: 'community', title: 'Community-Flieger', text: 'Die Zeit mit anderen Piloten, Austausch und gemeinsame Flugtage gehören für dich fest dazu.' },
-  { id: 'scenery', title: 'Landschafts-Entdecker', text: 'Du suchst neue Gebiete und schöne Lichtstimmungen und fliegst gern in ruhiger bis moderater Luft.' },
-  { id: 'progress', title: 'Entwicklungsorientiert', text: 'Du beschäftigst dich bewusst mit Technik, Thermik und Entscheidungen und nutzt Herausforderungen zum Lernen.' },
-  { id: 'hikefly', title: 'Hike & Fly', text: 'Der Zustieg gehört dazu: Bewegung, Natur und Fliegen als Gesamtpaket.' },
+export const STYLE_OPTIONS: { id: FlightStyle; title: string; subtitle: string; text: string; mode: Goal }[] = [
+  {
+    id: 'butter',
+    title: 'Butter-Typ',
+    subtitle: 'entspannte:r Genussflieger:in',
+    text: 'Du magst ruhige, gut einschätzbare Bedingungen. Du fliegst aus Spaß und Genuss. Die Luft darf dabei gern so zart sein wie zimmerwarme Butter.',
+    mode: 'chill',
+  },
+  {
+    id: 'community',
+    title: 'Kaffee-oder-Tee-Typ',
+    subtitle: 'Community-Flieger:in',
+    text: 'Die Zeit mit anderen Piloten, Austausch und gemeinsame Flugtage gehören für dich fest dazu. Die Luft darf ruhig bis moderat sein.',
+    mode: 'chill',
+  },
+  {
+    id: 'explorer',
+    title: 'Pralinenschachtel-Typ',
+    subtitle: 'Landschafts-Entdecker:in',
+    text: 'Du suchst neue Aussichten und Gebiete und fliegst gern in bewegter Luft.',
+    mode: 'progress',
+  },
+  {
+    id: 'learner',
+    title: 'Erdnussbutter-Typ',
+    subtitle: 'entwicklungsorientiert',
+    text: 'Du beschäftigst dich bewusst mit Technik, Thermik und Entscheidungen und nutzt Herausforderungen, um zu lernen und deinen Horizont zu erweitern.',
+    mode: 'progress',
+  },
+  {
+    id: 'xc',
+    title: 'Dreiecksbrötchen-Typ',
+    subtitle: 'Punktesammler:in',
+    text: 'Fliegen ist Routine für dich, dir geht es um Strecke.',
+    mode: 'xc',
+  },
+  {
+    id: 'hikefly',
+    title: 'Snack-Typ',
+    subtitle: 'Hike & Fly',
+    text: 'Der Zustieg gehört dazu: Bewegung, Natur und Fliegen als Gesamtpaket. Ein ruhiges bis moderates Flugfenster ist dir wichtig.',
+    mode: 'chill',
+  },
+];
+
+/** Flugstile aus Schritt 3 auf die neuen Typen abbilden (gespeicherte Profile) */
+const LEGACY_STYLE: Record<string, FlightStyle> = { relaxed: 'butter', scenery: 'explorer', progress: 'learner' };
+
+export function normalizeStyle(style: string): FlightStyle {
+  if (STYLE_OPTIONS.some((o) => o.id === style)) return style as FlightStyle;
+  return LEGACY_STYLE[style] ?? 'butter';
+}
+
+export const FAMILIAR_OPTIONS: { id: Familiarity; title: string; text: string }[] = [
+  { id: 'yes', title: 'Ja', text: 'Ich kenne meinen Schirm und mein Gurtzeug gut und fühle mich darauf sicher.' },
+  { id: 'partly', title: 'Teilweise', text: 'Ich bin noch dabei, mein System kennenzulernen.' },
+  { id: 'no', title: 'Noch nicht', text: 'Neues oder ungewohntes System, oder ich fühle mich darauf noch nicht sicher.' },
+];
+
+export const REVERSE_OPTIONS: { id: 'yes' | 'no'; title: string; text: string }[] = [
+  { id: 'yes', title: 'Ja, sicher', text: 'Ich ziehe auch bei kräftigem Wind kontrolliert rückwärts auf.' },
+  { id: 'no', title: 'Nein oder unsicher', text: 'Ich starte meist vorwärts.' },
+];
+
+export const CROSSWIND_OPTIONS: { id: CrosswindTolerance; title: string; text: string }[] = [
+  { id: 'no', title: 'Nein', text: 'Nur bei Gegenwind aus dem Windfenster des Startplatzes.' },
+  { id: 'light', title: 'Leicht', text: 'Schwacher Seitenwind ist für mich in Ordnung, wenn der Startplatz es hergibt.' },
+  { id: 'yes', title: 'Ja', text: 'Ich starte auch bei deutlichem Seitenwind, soweit der Startplatz es erlaubt.' },
+];
+
+export const TAILWIND_OPTIONS: { id: TailwindTolerance; title: string; text: string }[] = [
+  { id: 'no', title: 'Nein', text: 'Rückenwind-Starts kommen für mich nicht in Frage.' },
+  { id: 'light', title: 'Leicht', text: 'Leichten Rückenwind (unter 5 km/h) beherrsche ich. Die App zeigt solche Stunden nur im Modus Push.' },
 ];
 
 export const WING_OPTIONS: { id: WingClass; title: string; text: string }[] = [
@@ -42,9 +123,9 @@ export const WING_OPTIONS: { id: WingClass; title: string; text: string }[] = [
 ];
 
 export const CURRENCY_OPTIONS: { id: Currency; title: string }[] = [
-  { id: 'low', title: 'unter 20 Flüge im Jahr' },
-  { id: 'mid', title: '20 bis 50 Flüge im Jahr' },
-  { id: 'high', title: 'über 50 Flüge im Jahr' },
+  { id: 'low', title: 'unter 20 Flüge oder Stunden im Jahr' },
+  { id: 'mid', title: '20 bis 50 Flüge oder Stunden im Jahr' },
+  { id: 'high', title: 'über 50 Flüge oder Stunden im Jahr' },
 ];
 
 export const SKILL_QUESTIONS: { id: string; label: string }[] = [
@@ -127,9 +208,13 @@ export interface CharacterResult {
   /** wie die Grenzen zustande kommen, in Sätzen */
   adjustments: string[];
   defaultMode: Goal;
-  /** XC passt laut Character (Technik ab „solide“ und kein erhöhtes Stressniveau) */
+  /** Push passt laut Character (Technik ab „solide“ und kein erhöhtes Stressniveau) */
   xcAdvised: boolean;
   xcReason: string;
+  /** Startbedingungen, mit denen die Engine rechnet (gesperrte Fragen zählen als „nein“) */
+  launch: LaunchPrefs;
+  crosswindUnlocked: boolean;
+  tailwindUnlocked: boolean;
 }
 
 const DIMS: DimensionKey[] = ['wind_comfort', 'thermic_character', 'shear_turbulence', 'structure_cap'];
@@ -158,6 +243,7 @@ export function buildEnvelope(
   safetyLevel: SafetyLevel,
   wing: WingClass,
   currency: Currency,
+  familiar: Familiarity = 'yes',
 ): { envelope: Envelope; adjustments: string[] } {
   const shift: Record<DimensionKey, number> = { wind_comfort: 0, thermic_character: 0, shear_turbulence: 0, structure_cap: 0 };
   const adjustments: string[] = [];
@@ -176,12 +262,20 @@ export function buildEnvelope(
   if (wing === 'A') {
     shift.wind_comfort -= 0.5;
     adjustments.push('EN-A-Schirm: weniger Geschwindigkeitsreserve, Wind eine halbe Stufe vorsichtiger.');
+  } else if ((wing === 'C' || wing === 'D') && familiar !== 'yes') {
+    adjustments.push('Höhere Schirmklasse, mit der du noch nicht ganz vertraut bist: kein Zuschlag beim Wind, das Potenzial ist noch nicht sicher nutzbar.');
   } else if ((wing === 'C' || wing === 'D') && (skillLevel === 'solid' || skillLevel === 'high')) {
     const bonus = wing === 'C' ? 0.25 : 0.5;
     shift.wind_comfort += bonus;
     adjustments.push(`${wing === 'C' ? 'EN-C' : 'EN-D'}-Schirm mit solider Technik: Wind ${wing === 'C' ? 'eine Viertelstufe' : 'eine halbe Stufe'} mehr. Turbulenz bleibt, weil höhere Klassen weniger verzeihen.`);
   } else if (wing === 'C' || wing === 'D') {
     adjustments.push('Höhere Schirmklasse bei noch wenig Routine: kein Zuschlag beim Wind.');
+  }
+
+  if (familiar === 'no') {
+    shift.wind_comfort -= 0.25;
+    shift.shear_turbulence -= 0.25;
+    adjustments.push('Mit dem System noch nicht vertraut: Wind und Turbulenz eine Viertelstufe vorsichtiger.');
   }
 
   if (currency === 'low') {
@@ -208,8 +302,23 @@ export function buildEnvelope(
   return { envelope, adjustments };
 }
 
-export function defaultModeFor(style: FlightStyle): Goal {
-  return style === 'progress' ? 'progress' : 'chill';
+/** Tagesmodus zum Start nach Flugstil. Push nur, wenn der Character es hergibt, sonst Flow. */
+export function defaultModeFor(style: FlightStyle, xcAdvised = true): Goal {
+  const mode = STYLE_OPTIONS.find((o) => o.id === normalizeStyle(style))?.mode ?? 'chill';
+  return mode === 'xc' && !xcAdvised ? 'progress' : mode;
+}
+
+/**
+ * Frage nach Seitenwind erst für erfahrene Piloten: Technik ab „solide“, mindestens 20 Flüge im Jahr, mit dem System
+ * vertraut und kein erhöhtes Stressniveau.
+ */
+export function crosswindUnlocked(skill: SkillLevel, safety: SafetyLevel, currency: Currency, familiar: Familiarity): boolean {
+  return (skill === 'solid' || skill === 'high') && currency !== 'low' && familiar === 'yes' && safety !== 'high_stress';
+}
+
+/** Frage nach Rückenwind nur für sehr erfahrene Piloten: Technik „hoch“, über 50 Flüge, vertraut und stabil. */
+export function tailwindUnlocked(skill: SkillLevel, safety: SafetyLevel, currency: Currency, familiar: Familiarity): boolean {
+  return skill === 'high' && currency === 'high' && familiar === 'yes' && safety === 'stable';
 }
 
 export function scoreCharacter(a: CharacterAnswers): CharacterResult {
@@ -217,15 +326,23 @@ export function scoreCharacter(a: CharacterAnswers): CharacterResult {
   const safetyTotal = sum(a.safety, SAFETY_QUESTIONS);
   const skill = skillBand(skillTotal);
   const safety = safetyBand(safetyTotal);
-  const { envelope, adjustments } = buildEnvelope(skill.level, safety.level, a.wing, a.currency);
+  const familiar = a.familiar ?? 'yes';
+  const { envelope, adjustments } = buildEnvelope(skill.level, safety.level, a.wing, a.currency, familiar);
   const lowSkill = skill.level === 'foundation' || skill.level === 'basic';
   const stressed = safety.level === 'high_stress';
   const xcAdvised = !lowSkill && !stressed;
   const xcReason = xcAdvised
     ? ''
     : lowSkill
-      ? `Dein Technik-Score liegt bei ${skillTotal} von 50, XC empfiehlt der Coach ab 31.`
-      : `Dein Sicherheits-Score liegt bei ${safetyTotal} von 40, XC empfiehlt der Coach ab 21.`;
+      ? `Dein Technik-Score liegt bei ${skillTotal} von 50, Push empfiehlt der Coach ab 31.`
+      : `Dein Sicherheits-Score liegt bei ${safetyTotal} von 40, Push empfiehlt der Coach ab 21.`;
+  const cwOpen = crosswindUnlocked(skill.level, safety.level, a.currency, familiar);
+  const twOpen = tailwindUnlocked(skill.level, safety.level, a.currency, familiar);
+  const launch: LaunchPrefs = {
+    crosswind: cwOpen ? (a.crosswind ?? 'no') : 'no',
+    tailwind: twOpen ? (a.tailwind ?? 'no') : 'no',
+    reverseLaunch: a.reverseLaunch,
+  };
   return {
     skillTotal,
     skillLevel: skill.level,
@@ -235,9 +352,12 @@ export function scoreCharacter(a: CharacterAnswers): CharacterResult {
     safetyLabel: safety.label,
     envelope,
     adjustments,
-    defaultMode: defaultModeFor(a.style),
+    defaultMode: defaultModeFor(a.style, xcAdvised),
     xcAdvised,
     xcReason,
+    launch,
+    crosswindUnlocked: cwOpen,
+    tailwindUnlocked: twOpen,
   };
 }
 
@@ -251,4 +371,4 @@ export function envelopeFromTolerance(tolerance: Record<DimensionKey, { max_scor
   return envelope;
 }
 
-export const STYLE_NAMES: Record<FlightStyle, string> = Object.fromEntries(STYLE_OPTIONS.map((o) => [o.id, o.title])) as Record<FlightStyle, string>;
+export const STYLE_NAMES: Record<FlightStyle, string> = Object.fromEntries(STYLE_OPTIONS.map((o) => [o.id, `${o.title} (${o.subtitle})`])) as Record<FlightStyle, string>;

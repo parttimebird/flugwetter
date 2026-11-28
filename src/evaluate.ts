@@ -24,6 +24,7 @@ import {
   sunTimes,
   windAt,
 } from './physics.ts';
+import { aboveStart, alt100, de1 } from './format.ts';
 
 const KMH = 3.6;
 const r0 = (x: number) => Math.round(x);
@@ -123,6 +124,7 @@ export function computeMetrics(spot: Spot, hour: HourInput, cfg: EngineConfig): 
   return {
     takeoffWindKmh: r1(wTake.speed * KMH),
     takeoffWindDir: r0(wTake.dir),
+    takeoffInSector: inSector(wTake.dir, spot.windSector),
     headwindKmh: r1(headwind * KMH),
     crosswindKmh: r1(crosswind * KMH),
     windAboveKmh: r1(wAbove.speed * KMH),
@@ -179,12 +181,11 @@ export function scoreDimensions(
   cfg: EngineConfig,
 ): Record<DimensionKey, DimensionScore> {
   // A: Windkomfort
-  const wReasons: string[] = [`Start: ${r0(m.takeoffWindKmh)} km/h aus ${compass(m.takeoffWindDir)}`];
+  const wReasons: string[] = [`Grundwind am Start ${r0(m.takeoffWindKmh)} km/h aus ${compass(m.takeoffWindDir)}`, `Böen bis ${r0(m.gustKmh)} km/h`];
   const sTake = curve(cfg.wind.takeoff, m.takeoffWindKmh);
   const sLayer = curve(cfg.wind.takeoff, m.layerMaxWindKmh) - cfg.wind.layerOffset;
   const sGust = curve(cfg.wind.gustSpread, m.gustSpreadKmh) - cfg.wind.gustOffset;
   if (sLayer > sTake) wReasons.push(`in der Flugschicht bis ${r0(m.layerMaxWindKmh)} km/h`);
-  if (sGust > sTake && sGust > 0.5) wReasons.push(`Böen bis ${r0(m.gustKmh)} km/h`);
   const wind = makeScore('wind_comfort', Math.max(sTake, sLayer, sGust, 0), wReasons);
 
   // B: Thermik-Charakter
@@ -194,14 +195,14 @@ export function scoreDimensions(
     thermal = 0;
     tReasons.push('keine Sonneneinstrahlung');
   } else {
-    tReasons.push(`w* ${m.wStar} m/s, Steigen ca. ${m.climbEstimate} m/s`);
-    if (m.tiMin !== null) tReasons.push(`TI bis ${m.tiMin} K`);
+    tReasons.push(`w* ${de1(m.wStar)} m/s, Steigen ca. ${de1(m.climbEstimate)} m/s`);
+    if (m.tiMin !== null) tReasons.push(`TI bis ${de1(m.tiMin)} K`);
     if (m.workingHeight < 150) {
       thermal = Math.min(thermal, 0.5);
       tReasons.push('Thermik reicht kaum über den Start');
     } else if (m.workingHeight < 400) {
       thermal = Math.min(thermal, 1.5);
-      tReasons.push(`nur ${m.workingHeight} m Thermik über dem Start`);
+      tReasons.push(`Thermik nur ${aboveStart(m.workingHeight)}`);
     }
   }
   const capeScore = curve(cfg.thermal.cape, m.cape);
@@ -217,15 +218,15 @@ export function scoreDimensions(
   // C: Scherung und Turbulenz
   const cReasons: string[] = [];
   const parts: { s: number; why: string }[] = [
-    { s: curve(cfg.shear.shear, m.shearPerKm), why: `Windscherung ${m.shearPerKm} m/s pro km` },
+    { s: curve(cfg.shear.shear, m.shearPerKm), why: `Windscherung ${de1(m.shearPerKm)} m/s pro km` },
     { s: curve(cfg.shear.gustSpread, m.gustSpreadKmh), why: `Böen ${r0(m.gustSpreadKmh)} km/h über Mittelwind` },
   ];
   if (m.gustFactor !== null) {
-    parts.push({ s: curve(cfg.shear.gustFactor, m.gustFactor), why: `Böenfaktor ${m.gustFactor}` });
+    parts.push({ s: curve(cfg.shear.gustFactor, m.gustFactor), why: `Böenfaktor ${de1(m.gustFactor)}` });
   }
   if (m.wStar >= 0.8) {
     const ratio = m.layerMeanWindKmh / KMH / m.wStar;
-    parts.push({ s: curve(cfg.shear.windToThermal, ratio), why: `Wind zerreißt die Bärte (Wind/w* = ${r1(ratio)})` });
+    parts.push({ s: curve(cfg.shear.windToThermal, ratio), why: `Wind zerreißt die Bärte (Wind/w* = ${de1(r1(ratio))})` });
     parts.push({ s: curve(cfg.shear.thermalTurbulence, m.wStar), why: 'kräftige Thermik selbst' });
   }
   parts.sort((a, b) => b.s - a.s);
@@ -250,9 +251,10 @@ export function scoreDimensions(
     struct = 0;
     dReasons.push('ohne Einstrahlung keine Thermik');
   } else {
-    if (m.cloudBaseMsl !== null) dReasons.push(`Basis ${m.cloudBaseMsl} m (${m.cloudBaseMsl - spot.elevation} m über Start)`);
-    else dReasons.push(`Blauthermik bis ${m.thermalTopMsl} m (${m.workingHeight} m über Start)`);
-    if (m.inversion) dReasons.push(`Inversion ab ${m.inversion.baseMsl} m (+${m.inversion.strengthK} K)`);
+    dReasons.push(`mögliche Überhöhung ${aboveStart(m.workingHeight)}, Einschätzung: ${climbOutlook(m)}`);
+    if (m.cloudBaseMsl !== null) dReasons.push(`Basis ${alt100(m.cloudBaseMsl)}`);
+    else dReasons.push(`Blauthermik bis ${alt100(m.thermalTopMsl)}`);
+    if (m.inversion) dReasons.push(`Deckel: Inversion ab ${alt100(m.inversion.baseMsl)} (+${de1(m.inversion.strengthK)} K)`);
     if (overdev > struct) {
       struct = overdev;
       dReasons.push('hochreichende Konvektion möglich');
@@ -292,8 +294,8 @@ export function checkRules(spot: Spot, hour: HourInput, m: HourMetrics, cfg: Eng
       code: 'lowbase',
       text:
         m.cloudBaseMsl <= spot.elevation
-          ? `Basis ${m.cloudBaseMsl} m, also unter dem Start: Start zeitweise in der Wolke`
-          : `Basis ${m.cloudBaseMsl} m, zu knapp über dem Start`,
+          ? `Basis ${alt100(m.cloudBaseMsl)}, also unter dem Start: Start zeitweise in der Wolke`
+          : `Basis ${alt100(m.cloudBaseMsl)}, zu knapp über dem Start`,
     });
   }
   if (m.takeoffWindKmh > spot.maxWindKmh) {
@@ -353,7 +355,11 @@ export function checkRules(spot: Spot, hour: HourInput, m: HourMetrics, cfg: Eng
   if (hour.isDay) {
     if (m.layerMaxWindKmh >= m.takeoffWindKmh + 12) warnings.push(`oben deutlich windiger (bis ${r0(m.layerMaxWindKmh)} km/h)`);
     if (m.cape >= 300) warnings.push(`Labile Luft (CAPE ${m.cape} J/kg), Überentwicklung beobachten`);
-    if (m.inversion && m.inversion.baseMsl >= spot.elevation - 50 && m.inversion.baseMsl < spot.elevation + 300) {
+    if (m.inversion && m.inversion.strengthK >= rules.strongInversionK && m.inversion.baseMsl >= spot.elevation - 50) {
+      warnings.push(
+        `Kräftige Inversion ab ${alt100(m.inversion.baseMsl)} (+${de1(m.inversion.strengthK)} K)${m.inversion.baseMsl < spot.elevation + 300 ? ', knapp über dem Start' : ''}: beim Durchstoßen kann es ruppig werden`,
+      );
+    } else if (m.inversion && m.inversion.baseMsl >= spot.elevation - 50 && m.inversion.baseMsl < spot.elevation + 300) {
       warnings.push('Inversion knapp über dem Start');
     } else if (m.inversion && m.inversion.baseMsl < spot.elevation - 50) {
       warnings.push('Bodeninversion unter dem Start: kalte, stabile Luft im Tal');
@@ -362,11 +368,33 @@ export function checkRules(spot: Spot, hour: HourInput, m: HourMetrics, cfg: Eng
     if (spot.airspace && m.workingHeight > 0) {
       const top = m.cloudBaseMsl ?? m.thermalTopMsl;
       if (top > spot.airspace.floorMsl) {
-        warnings.push(`Thermik reicht bis ${top} m: ${spot.airspace.note}`);
+        warnings.push(`Thermik reicht bis ${alt100(top)}: ${spot.airspace.note}`);
       }
     }
   }
   return { noGo, warnings };
+}
+
+/** Ob Überhöhen realistisch ist: aus Arbeitshöhe und geschätztem Steigen */
+export function climbOutlook(m: HourMetrics): 'realistisch' | 'begrenzt' | 'unwahrscheinlich' {
+  if (m.workingHeight < 300 || m.climbEstimate < 0.2) return 'unwahrscheinlich';
+  if (m.workingHeight < 700 || m.climbEstimate < 0.6) return 'begrenzt';
+  return 'realistisch';
+}
+
+/**
+ * Hinweis auf Soaring: klarer Gegenwind aus dem Windfenster, Böen höchstens 35 km/h, wenig Turbulenz.
+ * Mit wenig Thermik ist das gutes Soaring; mit kräftiger Thermik ist die Thermik stark winddurchsetzt und eher ruppig.
+ * Ob der Hang am Startplatz Soaring hergibt, weiß die Engine noch nicht, deshalb nur als Hinweis.
+ */
+export function soaringHint(m: HourMetrics, dims: Record<DimensionKey, DimensionScore>, cfg: EngineConfig): string | null {
+  const r = cfg.rules;
+  if (!m.takeoffInSector || m.headwindKmh < r.soaringMinHeadwindKmh || m.gustKmh > r.soaringMaxGustKmh) return null;
+  if (dims.shear_turbulence.score > 3) return null;
+  const wind = `${r0(m.headwindKmh)} km/h Gegenwind, Böen bis ${r0(m.gustKmh)} km/h`;
+  if (dims.thermic_character.score <= 1.5) return `Soaringbedingungen möglich: ${wind}, wenig Thermik. Prüfe vor Ort, ob der Hang Soaring hergibt.`;
+  if (dims.thermic_character.score >= 2.5) return `Thermisches Soaring: ${wind}, die Thermik ist stark winddurchsetzt und eher ruppig.`;
+  return `Soaring mit etwas Thermik: ${wind}.`;
 }
 
 // ---------------------------------------------------------------------------

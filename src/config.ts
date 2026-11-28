@@ -66,6 +66,11 @@ export interface EngineConfig {
     gustMarginKmh: number;
     /** Höhenwind von hinten ab dieser Stärke (km/h) gilt als Lee */
     leeMinKmh: number;
+    /** Inversion ab dieser Stärke (K auf 200 m) gilt als kräftig: Hinweis auf Turbulenz beim Durchstoßen */
+    strongInversionK: number;
+    /** Soaring-Hinweis ab diesem Gegenwind (km/h) und bis zu diesen Böen (km/h) */
+    soaringMinHeadwindKmh: number;
+    soaringMaxGustKmh: number;
   };
   zones: {
     noGoWind: number;
@@ -195,6 +200,9 @@ export const DEFAULT_CONFIG: EngineConfig = {
     minBaseAboveTakeoff: 150,
     gustMarginKmh: 12,
     leeMinKmh: 12,
+    strongInversionK: 2,
+    soaringMinHeadwindKmh: 15,
+    soaringMaxGustKmh: 35,
   },
   zones: {
     noGoWind: 4.5,
