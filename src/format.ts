@@ -46,23 +46,6 @@ export function gustClass(kmh: number): string {
   return 'sehr stark, kritisch';
 }
 
-/**
- * Wie gleichmäßig der Wind ist, aus Grundwind und Böen (Vorschlag für Marvins Grundwind/Böen-Matrix):
- * Abstand Böe minus Grundwind bis 3 km/h perfekt, bis 5 sehr gut, bis 10 gut, bis 15 unruhig, bis 20 ruppig, darüber grenzwertig.
- * Böen über 35 km/h sind immer kritisch. Unter 5 km/h Grundwind und Böen unter 10 gibt es keine Einstufung (fast windstill).
- */
-export function gustQuality(baseKmh: number, gustKmh: number): string | null {
-  if (gustKmh > 35) return 'kritisch';
-  if (baseKmh < 5 && gustKmh < 10) return null;
-  const spread = Math.max(0, gustKmh - baseKmh);
-  if (spread <= 3) return 'perfekt';
-  if (spread <= 5) return 'sehr gut';
-  if (spread <= 10) return 'gut';
-  if (spread <= 15) return 'unruhig';
-  if (spread <= 20) return 'ruppig';
-  return 'grenzwertig';
-}
-
 export function capitalize(s: string): string {
   return s ? s[0].toUpperCase() + s.slice(1) : s;
 }

@@ -193,6 +193,10 @@ export interface HourMetrics {
   gustKmh: number;
   gustSpreadKmh: number;
   gustFactor: number | null;
+  /** Böenstufe nach Marvins Grundwind/Böen-Matrix: 0 laminar bis 6 No-Go (src/wind.ts) */
+  gustLevel: number;
+  /** Soaring-Stunde und für welchen Modus sie mindestens taugt (null = kein Soaring); setzt evaluateHour */
+  soaringMode?: Goal | null;
   /** Windscherung in der Flugschicht, m/s pro 1000 m */
   shearPerKm: number;
   thermalTopMsl: number;

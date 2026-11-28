@@ -2,7 +2,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { aboveStart, alt100, baseWindClass, gustClass, gustQuality, plus100 } from '../src/format.ts';
+import { aboveStart, alt100, baseWindClass, gustClass, plus100 } from '../src/format.ts';
 
 test('Höhen aus dem Modell werden auf 100 m gerundet', () => {
   assert.equal(alt100(1284), 'rund 1.300 m');
@@ -19,12 +19,4 @@ test('Grundwind und Böen nach den Stufen aus dem Konzept', () => {
   assert.equal(gustClass(20), 'mäßig');
   assert.equal(gustClass(33), 'stark');
   assert.equal(gustClass(36), 'sehr stark, kritisch');
-});
-
-test('Böigkeit folgt Marvins Beispielen 5/8, 5/10, 5/15', () => {
-  assert.equal(gustQuality(5, 8), 'perfekt');
-  assert.equal(gustQuality(5, 10), 'sehr gut');
-  assert.equal(gustQuality(5, 15), 'gut');
-  assert.equal(gustQuality(20, 40), 'kritisch');
-  assert.equal(gustQuality(2, 6), null);
 });

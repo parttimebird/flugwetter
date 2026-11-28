@@ -105,14 +105,14 @@ export const REVERSE_OPTIONS: { id: 'yes' | 'no'; title: string; text: string }[
 ];
 
 export const CROSSWIND_OPTIONS: { id: CrosswindTolerance; title: string; text: string }[] = [
-  { id: 'no', title: 'Nein', text: 'Nur bei Gegenwind aus dem Windfenster des Startplatzes.' },
-  { id: 'light', title: 'Leicht', text: 'Schwacher Seitenwind ist für mich in Ordnung, wenn der Startplatz es hergibt.' },
-  { id: 'yes', title: 'Ja', text: 'Ich starte auch bei deutlichem Seitenwind, soweit der Startplatz es erlaubt.' },
+  { id: 'no', title: 'Nein', text: 'Wind höchstens 30° schräg von vorn und Böen bis 15 km/h.' },
+  { id: 'light', title: 'Leicht', text: 'Bis 30° schräg bei Böen bis 20 km/h, bis 60° bei Böen bis 10 km/h.' },
+  { id: 'yes', title: 'Ja', text: 'Bis 30° bei Böen bis 20 km/h, bis 60° bei Böen bis 15 km/h. Stärker seitlich zeigt die App als „kritisch prüfen“.' },
 ];
 
 export const TAILWIND_OPTIONS: { id: TailwindTolerance; title: string; text: string }[] = [
   { id: 'no', title: 'Nein', text: 'Rückenwind-Starts kommen für mich nicht in Frage.' },
-  { id: 'light', title: 'Leicht', text: 'Leichten Rückenwind (unter 5 km/h) beherrsche ich. Die App zeigt solche Stunden nur im Modus Push.' },
+  { id: 'light', title: 'Leicht', text: 'Leichten Rückenwind (unter 5 km/h, Böen unter 10 km/h) beherrsche ich. Die App zeigt solche Stunden nur im Modus Push.' },
 ];
 
 export const WING_OPTIONS: { id: WingClass; title: string; text: string }[] = [

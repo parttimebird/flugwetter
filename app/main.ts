@@ -9,7 +9,8 @@ import { clockTime, compass, sunTimes } from '../src/physics.ts';
 import { DIM_NAMES, GOAL_NAMES, LAUNCH_LIMITS, PZONE_NAMES, dimensionZone, envelopeOf, launchPrefsOf, modeLimit } from '../src/profile.ts';
 import { DEFAULT_CONFIG } from '../src/config.ts';
 import { climbOutlook } from '../src/evaluate.ts';
-import { alt100, baseWindClass, capitalize, gustClass, gustQuality, plus100 } from '../src/format.ts';
+import { alt100, baseWindClass, capitalize, gustClass, plus100 } from '../src/format.ts';
+import { gustLabel } from '../src/wind.ts';
 import {
   CROSSWIND_OPTIONS,
   CURRENCY_OPTIONS,
@@ -511,7 +512,10 @@ const INFO: Record<InfoKey, { title: string; text: string[] }> = {
       'Grundwind: der mittlere Wind in Starthöhe, aus dem Modellwind knapp über dem geglätteten Modellgelände.',
       'Böen: die stärksten Stöße in Bodennähe laut Modell. Je weiter Böen und Grundwind auseinanderliegen, desto unruhiger.',
       'Grundwind: unter 10 km/h schwach, 10–15 mäßig, 15–20 frisch, 20–25 stark, 25–30 sehr stark. Böen: unter 10 sehr schwach, 10–15 schwach, 15–25 mäßig, 25–35 stark, darüber kritisch.',
+      'Böigkeit: wie Grundwind und Böen zusammenpassen. Liegen die Böen höchstens etwa 5 km/h über dem Grundwind, ist es laminar. Jede weiteren 5 km/h machen es eine Stufe unruhiger (sehr gut, gut, Böen beachten, turbulent, deutlich turbulent). Bei schwachem Grundwind ist derselbe Abstand weniger kritisch, heißt aber wechselnde Windrichtung am Start; ab etwa 15 km/h Grundwind wird es schneller ruppig. Ob es für dich passt, entscheiden deine Zonen.',
+      'Deutlich mehr Böen als Grundwind immer hinterfragen. Mögliche Ursachen: Windscherung, thermische Turbulenz, Lee, Düsen und Geländeeffekte, Schauer- oder Gewitterböen.',
       'Wind aus der passenden Richtung kann den Start leichter machen als Windstille. Ab etwa 10 km/h ist Rückwärtsaufziehen die sicherere Startmethode.',
+      'Soaring: am schönsten bei geringer Böigkeit und wenig oder keiner Thermik. 15–20 km/h laminar passt auch für Chill, stärker eher Flow, sehr kräftig oder thermisch eher Push. Ob der Hang Soaring hergibt, prüfst du vor Ort.',
     ],
   },
   thermik: {
@@ -897,7 +901,7 @@ function dimValue(k: DimensionKey, x: HourEvaluation): string {
 /** Kennwerte einer Stunde: Grundwind und Böen getrennt, Höhen auf 100 m gerundet */
 function keyData(x: HourEvaluation): HTMLElement {
   const m = x.metrics;
-  const quality = gustQuality(m.takeoffWindKmh, m.gustKmh);
+  const quality = m.gustLevel !== undefined && (m.takeoffWindKmh >= 3 || m.gustKmh >= 10) ? gustLabel(m.gustLevel) : null;
   const wind = h(
     'span',
     { class: 'kd' },
@@ -1584,8 +1588,12 @@ function scoreMeter(label: string, value: number, max: number, bands: number[], 
 }
 
 function launchText(l: { crosswind: CrosswindTolerance; tailwind: TailwindTolerance; reverseLaunch?: boolean }): string {
-  const cw = { no: 'kein Seitenwind', light: 'leichter Seitenwind', yes: 'Seitenwind, soweit der Startplatz es hergibt' }[l.crosswind];
-  const tw = l.tailwind === 'light' ? 'leichter Rückenwind nur im Modus Push' : 'kein Rückenwind';
+  const cw = {
+    no: 'Seitenwind bis 30° bei Böen bis 15 km/h',
+    light: 'Seitenwind bis 30° bei Böen bis 20 km/h, bis 60° bei Böen bis 10 km/h',
+    yes: 'Seitenwind bis 30° bei Böen bis 20 km/h, bis 60° bei Böen bis 15 km/h, darüber kritisch prüfen',
+  }[l.crosswind];
+  const tw = l.tailwind === 'light' ? 'leichter Rückenwind nur im Modus Push und bei Böen unter 10 km/h' : 'kein Rückenwind';
   const rev =
     l.reverseLaunch === true
       ? 'Rückwärtsaufziehen sicher'

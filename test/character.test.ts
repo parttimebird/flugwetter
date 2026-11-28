@@ -21,7 +21,7 @@ import {
 import { DEFAULT_LAUNCH, dimensionZone, launchCheck, personalFit, personalZone } from '../src/profile.ts';
 import { summarizeDays } from '../src/windows.ts';
 import { DEFAULT_CONFIG } from '../src/config.ts';
-import type { DimensionKey, DimensionScore, Goal, HourEvaluation, HourMetrics, PilotProfile } from '../src/types.ts';
+import type { DimensionKey, DimensionScore, Goal, HourEvaluation, HourMetrics, LaunchPrefs, PilotProfile } from '../src/types.ts';
 import { loadPilot } from './helpers.ts';
 
 const DIMS: DimensionKey[] = ['wind_comfort', 'thermic_character', 'shear_turbulence', 'structure_cap'];
@@ -188,7 +188,7 @@ function launchMetrics(over: Partial<HourMetrics>): HourMetrics {
 }
 
 test('Startbedingungen: Rückenwind nur sehr erfahren und nur im Modus Push', () => {
-  const tail = launchMetrics({ takeoffWindKmh: 4, headwindKmh: -4, takeoffInSector: false });
+  const tail = launchMetrics({ takeoffWindKmh: 4, headwindKmh: -4, takeoffInSector: false, gustKmh: 6 });
   assert.equal(launchCheck(tail, { crosswind: 'yes', tailwind: 'no' }, 'xc').issues.length, 1);
   assert.equal(launchCheck(tail, { crosswind: 'yes', tailwind: 'light' }, 'progress').issues.length, 1);
   assert.match(launchCheck(tail, { crosswind: 'yes', tailwind: 'light' }, 'progress').issues[0], /Push/);
@@ -197,17 +197,36 @@ test('Startbedingungen: Rückenwind nur sehr erfahren und nur im Modus Push', ()
   assert.equal(launchCheck(launchMetrics({ takeoffWindKmh: 2, headwindKmh: -2 }), DEFAULT_LAUNCH, 'chill').issues.length, 0);
 });
 
-test('Startbedingungen: Seitenwind je nach Toleranz', () => {
-  const outside = launchMetrics({ takeoffWindKmh: 4, headwindKmh: 0.5, crosswindKmh: 4, takeoffInSector: false });
-  assert.equal(launchCheck(outside, DEFAULT_LAUNCH, 'chill').issues.length, 1);
-  assert.equal(launchCheck(outside, { crosswind: 'light', tailwind: 'no' }, 'chill').issues.length, 0);
-  const outside6 = launchMetrics({ takeoffWindKmh: 6, headwindKmh: 1, crosswindKmh: 6, takeoffInSector: false });
-  assert.equal(launchCheck(outside6, { crosswind: 'light', tailwind: 'no' }, 'chill').issues.length, 1);
-  assert.equal(launchCheck(outside6, { crosswind: 'yes', tailwind: 'no' }, 'chill').issues.length, 0);
-  // im Windfenster, aber schräg: Seitenwind-Anteil 9 km/h
-  const oblique = launchMetrics({ takeoffWindKmh: 13, headwindKmh: 9, crosswindKmh: 9 });
-  assert.equal(launchCheck(oblique, DEFAULT_LAUNCH, 'chill').issues.length, 1);
-  assert.equal(launchCheck(oblique, { crosswind: 'light', tailwind: 'no' }, 'chill').issues.length, 0);
+/** Wind aus `deg` Grad neben der Startrichtung */
+function angled(speed: number, deg: number, gust: number): HourMetrics {
+  const rad = (deg * Math.PI) / 180;
+  return launchMetrics({ takeoffWindKmh: speed, headwindKmh: speed * Math.cos(rad), crosswindKmh: speed * Math.sin(rad), gustKmh: gust });
+}
+
+test('Startbedingungen: Seitenwind nach Winkel und Böen', () => {
+  const light: LaunchPrefs = { crosswind: 'light', tailwind: 'no' };
+  const yes: LaunchPrefs = { crosswind: 'yes', tailwind: 'no' };
+  // fast von vorn: keine eigene Seitenwind-Grenze
+  assert.equal(launchCheck(angled(12, 10, 25), DEFAULT_LAUNCH, 'chill').issues.length, 0);
+  // bis 30°: Böen bis 15 (nein) bzw. 20 (leicht, ja)
+  assert.equal(launchCheck(angled(10, 25, 14), DEFAULT_LAUNCH, 'chill').issues.length, 0);
+  assert.equal(launchCheck(angled(10, 25, 18), DEFAULT_LAUNCH, 'chill').issues.length, 1);
+  assert.equal(launchCheck(angled(10, 25, 18), light, 'chill').issues.length, 0);
+  // 30–60°: nein nie, leicht bis 10, ja bis 15
+  assert.equal(launchCheck(angled(6, 45, 9), DEFAULT_LAUNCH, 'chill').issues.length, 1);
+  assert.equal(launchCheck(angled(6, 45, 9), light, 'chill').issues.length, 0);
+  assert.equal(launchCheck(angled(8, 45, 13), light, 'chill').issues.length, 1);
+  assert.equal(launchCheck(angled(8, 45, 13), yes, 'chill').issues.length, 0);
+  // über 60°: nur bei „ja“, dann als Hinweis
+  assert.equal(launchCheck(angled(6, 75, 9), light, 'chill').issues.length, 1);
+  assert.equal(launchCheck(angled(6, 75, 9), yes, 'chill').issues.length, 0);
+  assert.match(launchCheck(angled(6, 75, 9), yes, 'chill').hints[0], /kritisch prüfen/);
+});
+
+test('Leichter Rückenwind nur bei Böen unter 10 km/h', () => {
+  const pro: LaunchPrefs = { crosswind: 'yes', tailwind: 'light' };
+  assert.equal(launchCheck(launchMetrics({ takeoffWindKmh: 4, headwindKmh: -4, gustKmh: 8 }), pro, 'xc').issues.length, 0);
+  assert.equal(launchCheck(launchMetrics({ takeoffWindKmh: 4, headwindKmh: -4, gustKmh: 12 }), pro, 'xc').issues.length, 1);
 });
 
 test('Startbedingungen: ohne Rückwärtsaufziehen kein Vorwärtsstart über 25 km/h', () => {
@@ -222,7 +241,7 @@ test('Startbedingungen: ohne Rückwärtsaufziehen kein Vorwärtsstart über 25 k
 test('Passt der Start nicht, zählt die Stunde nie als Flugfenster', () => {
   const pilot = withMode(loadPilot(), 'progress');
   pilot.launch = { crosswind: 'no', tailwind: 'no' };
-  const m = launchMetrics({ takeoffWindKmh: 4, headwindKmh: 0.5, crosswindKmh: 4, takeoffInSector: false });
+  const m = angled(6, 45, 9);
   const fit = personalFit(dims(1, 2, 1, 3), 'progress', [], pilot, m);
   assert.equal(fit.personalZone, 'red');
   assert.ok(fit.score < DEFAULT_CONFIG.windowMinFit);

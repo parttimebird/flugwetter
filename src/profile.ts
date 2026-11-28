@@ -19,6 +19,7 @@ import type {
   Zone,
 } from './types.ts';
 import { envelopeFromTolerance } from './character.ts';
+import { offFacingDeg } from './evaluate.ts';
 
 const DIM_NAMES: Record<DimensionKey, string> = {
   wind_comfort: 'Wind',
@@ -33,17 +34,21 @@ const GOAL_NAMES: Record<Goal, string> = { chill: 'Chill', progress: 'Flow', xc:
 /** Vorsichtiger Standard, solange der Pilot nichts anderes angibt */
 export const DEFAULT_LAUNCH: LaunchPrefs = { crosswind: 'no', tailwind: 'no' };
 
-/** Grenzen der Startbedingungen in km/h (Startwerte, siehe README) */
+/** Grenzen der Startbedingungen (Marvins Antwort vom 28.11.2026; Startwerte, siehe docs/aenderungskonzept.md) */
 export const LAUNCH_LIMITS = {
-  /** unter diesem Wind spielt die Richtung keine Rolle */
+  /** unter diesem Grundwind spielt die Richtung keine Rolle */
   calmKmh: 3,
   /** Rückenwind-Anteil ab dem es ein Rückenwind-Start ist */
   tailKmh: 2,
-  /** Seitenwind-Anteil innerhalb des Windfensters: ab hier zählt er bei „nein“ bzw. „leicht“ */
-  crossNoKmh: 8,
-  crossLightKmh: 12,
-  /** Wind von außerhalb des Windfensters ist bei „leicht“ bis hierhin noch ok */
-  outOfSectorLightKmh: 5,
+  /** leichter Rückenwind nur, solange die Böen darunter bleiben */
+  tailMaxGustKmh: 10,
+  /** bis zu diesem Winkel zur Startrichtung gilt Wind als Gegenwind ohne eigene Seitenwind-Grenze */
+  headOnDeg: 15,
+  /** Böen-Grenzen (km/h) je Winkel zur Startrichtung und Seitenwind-Toleranz; 0 = nicht erlaubt */
+  crossBands: [
+    { maxDeg: 30, gust: { no: 15, light: 20, yes: 20 } },
+    { maxDeg: 60, gust: { no: 0, light: 10, yes: 15 } },
+  ] as { maxDeg: number; gust: Record<'no' | 'light' | 'yes', number> }[],
   /** ab diesem Gegenwind hilft Rückwärtsaufziehen, ab dem zweiten Wert ohne es kein Vorwärtsstart */
   reverseHintKmh: 10,
   reverseRequiredKmh: 25,
@@ -52,6 +57,8 @@ export const LAUNCH_LIMITS = {
 /**
  * Passt der Start in dieser Stunde zu den Startbedingungen des Piloten?
  * Gibt Gründe zurück, warum nicht (dann kein Flugfenster), und Hinweise, die nur informieren.
+ * Seitenwind nach Winkel zur Startrichtung: bis 30° Böen bis 15/20/20 km/h (nein/leicht/ja), 30–60° bis 0/10/15 km/h,
+ * über 60° nur bei „ja“ und dann als „kritisch prüfen“. Rückenwind „leicht“ nur im Modus Push und mit Böen unter 10 km/h.
  * Die festen Regeln des Startplatzes (Windfenster ab 8 km/h, Rückenwind ab 5 km/h, Maximalwind) prüft checkRules vorher.
  */
 export function launchCheck(m: HourMetrics, prefs: LaunchPrefs, mode: Goal): { issues: string[]; hints: string[] } {
@@ -62,17 +69,23 @@ export function launchCheck(m: HourMetrics, prefs: LaunchPrefs, mode: Goal): { i
   if (speed < L.calmKmh) return { issues, hints };
   const tail = -m.headwindKmh;
   const kmh = (x: number) => `${Math.round(x)} km/h`;
+  const angle = offFacingDeg(m);
   if (tail >= L.tailKmh) {
     if (prefs.tailwind !== 'light') issues.push(`Rückenwind am Start (${kmh(tail)}): passt nicht zu deinen Startbedingungen`);
     else if (mode !== 'xc') issues.push(`Rückenwind am Start (${kmh(tail)}): Rückenwind-Starts zeigt die App nur im Modus Push`);
+    else if (m.gustKmh >= L.tailMaxGustKmh) issues.push(`Rückenwind am Start mit Böen bis ${kmh(m.gustKmh)}: leichter Rückenwind geht nur bei Böen unter ${L.tailMaxGustKmh} km/h`);
     else hints.push(`leichter Rückenwind am Start (${kmh(tail)}): nur mit sauberem, schnellem Start`);
-  } else if (!m.takeoffInSector) {
-    const ok = prefs.crosswind === 'yes' || (prefs.crosswind === 'light' && speed < L.outOfSectorLightKmh);
-    if (!ok) issues.push(`Seitenwind am Start (${kmh(speed)} von außerhalb des Windfensters): passt nicht zu deinen Startbedingungen`);
-    else hints.push(`Seitenwind am Start (${kmh(speed)} von außerhalb des Windfensters)`);
-  } else {
-    const limit = prefs.crosswind === 'no' ? L.crossNoKmh : prefs.crosswind === 'light' ? L.crossLightKmh : Infinity;
-    if (m.crosswindKmh >= limit) issues.push(`Seitenwind-Anteil am Start ${kmh(m.crosswindKmh)}: mehr, als zu deinen Startbedingungen passt`);
+  } else if (angle > L.headOnDeg) {
+    const band = L.crossBands.find((b) => angle <= b.maxDeg);
+    if (!band) {
+      if (prefs.crosswind !== 'yes') issues.push(`Wind ${angle}° seitlich zur Startrichtung: passt nicht zu deinen Startbedingungen`);
+      else hints.push(`Wind ${angle}° seitlich zur Startrichtung: kritisch prüfen, kann schon Lee oder Rückenwind sein`);
+    } else {
+      const limit = band.gust[prefs.crosswind];
+      if (limit === 0) issues.push(`Seitenwind ${angle}° zur Startrichtung: passt nicht zu deinen Startbedingungen`);
+      else if (m.gustKmh > limit) issues.push(`Seitenwind ${angle}° zur Startrichtung mit Böen bis ${kmh(m.gustKmh)}: für dich hier höchstens ${limit} km/h`);
+      else if (angle > 30) hints.push(`Seitenwind ${angle}° zur Startrichtung`);
+    }
   }
   if (m.headwindKmh >= L.reverseRequiredKmh && prefs.reverseLaunch === false) {
     issues.push(`Gegenwind ${kmh(m.headwindKmh)}: ohne Rückwärtsaufziehen empfiehlt die App keinen Vorwärtsstart über ${L.reverseRequiredKmh} km/h`);
@@ -140,10 +153,21 @@ export function personalZone(
   return worst;
 }
 
-export function goalsMet(dims: Record<DimensionKey, DimensionScore>, profile: PilotProfile): Goal[] {
+const GOAL_RANK: Record<Goal, number> = { chill: 0, progress: 1, xc: 2 };
+
+/**
+ * Welche Modi die Stunde erfüllt. Soaring-Stunden erfüllen ihren Soaring-Modus und alle anspruchsvolleren, auch ohne
+ * Thermik (Marvin: Soaring-Tage dürfen auch Chill oder Flow sein); ob der Wind passt, entscheiden die Zonen.
+ */
+export function goalsMet(dims: Record<DimensionKey, DimensionScore>, profile: PilotProfile, metrics?: HourMetrics): Goal[] {
   const req = profile.comfort_profile.min_required_scores_for_goal;
   const out: Goal[] = [];
+  const soar = metrics?.soaringMode ?? null;
   for (const goal of ['chill', 'progress', 'xc'] as Goal[]) {
+    if (soar && GOAL_RANK[goal] >= GOAL_RANK[soar]) {
+      out.push(goal);
+      continue;
+    }
     const r = req[goal];
     if (!r) continue;
     if (r.thermic_character_min !== undefined && dims.thermic_character.score < r.thermic_character_min) continue;
@@ -175,7 +199,7 @@ export function personalFit(
     return { score: 0, label: 'No-Go', personalZone: pz, mode, exceed: {}, goalsMet: [], notes: [], launchIssues: [] };
   }
   const launch = metrics ? launchCheck(metrics, launchPrefsOf(profile), mode) : { issues: [], hints: [] };
-  const met = goalsMet(dims, profile);
+  const met = goalsMet(dims, profile, metrics);
   const tol = profile.comfort_profile.tolerance;
   const exceed: FitResult['exceed'] = {};
   const notes: string[] = [];

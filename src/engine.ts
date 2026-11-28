@@ -2,7 +2,7 @@
 
 import type { ForecastData, HourEvaluation, HourInput, PilotProfile, Spot, SpotEvaluation } from './types.ts';
 import { DEFAULT_CONFIG, type EngineConfig } from './config.ts';
-import { checkRules, classifyZone, computeMetrics, scoreDimensions, soaringHint } from './evaluate.ts';
+import { checkRules, classifyZone, computeMetrics, scoreDimensions, soaringMode, windHints } from './evaluate.ts';
 import { personalFit } from './profile.ts';
 import { summarizeDays } from './windows.ts';
 import { compass } from './physics.ts';
@@ -13,12 +13,9 @@ export function evaluateHour(spot: Spot, hour: HourInput, pilot: PilotProfile, c
   const dimensions = scoreDimensions(spot, hour, metrics, cfg);
   const { noGo, warnings } = checkRules(spot, hour, metrics, cfg);
   const { zone, label } = classifyZone(dimensions, noGo, cfg);
+  metrics.soaringMode = zone === 'no-go' ? null : soaringMode(metrics, dimensions, cfg);
   const fit = personalFit(dimensions, zone, noGo, pilot, metrics);
-  const hints: string[] = [];
-  if (zone !== 'no-go') {
-    const soaring = soaringHint(metrics, dimensions, cfg);
-    if (soaring) hints.push(soaring);
-  }
+  const hints = zone === 'no-go' ? [] : windHints(metrics, dimensions, spot);
   return { time: hour.time, isDay: hour.isDay, metrics, dimensions, noGo, warnings, hints, zone, zoneLabel: label, fit, summary: summarize(spot, metrics, dimensions, noGo, label) };
 }
 

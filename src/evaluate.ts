@@ -25,6 +25,8 @@ import {
   windAt,
 } from './physics.ts';
 import { aboveStart, alt100, de1 } from './format.ts';
+import { gustLabel, gustLevel, gustTurbulenceScore } from './wind.ts';
+import type { Goal } from './types.ts';
 
 const KMH = 3.6;
 const r0 = (x: number) => Math.round(x);
@@ -135,6 +137,7 @@ export function computeMetrics(spot: Spot, hour: HourInput, cfg: EngineConfig): 
     // Böen gegen den Grundwind: im Wald ist der 10-m-Wind stark gebremst, deshalb zählt der stärkere von 10-m- und Startwind
     gustSpreadKmh: r1(Math.max(0, s.gust10 - baseWind) * KMH),
     gustFactor: baseWind * KMH >= 10 ? r1(s.gust10 / baseWind) : null,
+    gustLevel: gustLevel(wTake.speed * KMH, s.gust10 * KMH),
     shearPerKm: r1(maxShear),
     thermalTopMsl: r0(thermalTop),
     cloudBaseMsl: sunny && hasCu ? r0(parcel.lcl) : null,
@@ -184,7 +187,8 @@ export function scoreDimensions(
   const wReasons: string[] = [`Grundwind am Start ${r0(m.takeoffWindKmh)} km/h aus ${compass(m.takeoffWindDir)}`, `Böen bis ${r0(m.gustKmh)} km/h`];
   const sTake = curve(cfg.wind.takeoff, m.takeoffWindKmh);
   const sLayer = curve(cfg.wind.takeoff, m.layerMaxWindKmh) - cfg.wind.layerOffset;
-  const sGust = curve(cfg.wind.gustSpread, m.gustSpreadKmh) - cfg.wind.gustOffset;
+  // Böen zählen beim Wind als absoluter Wert, eine Stufe unter dem gleichen Grundwind; wie böig es ist, bewertet die Turbulenz
+  const sGust = curve(cfg.wind.takeoff, m.gustKmh) - cfg.wind.gustOffset;
   if (sLayer > sTake) wReasons.push(`in der Flugschicht bis ${r0(m.layerMaxWindKmh)} km/h`);
   const wind = makeScore('wind_comfort', Math.max(sTake, sLayer, sGust, 0), wReasons);
 
@@ -217,13 +221,11 @@ export function scoreDimensions(
 
   // C: Scherung und Turbulenz
   const cReasons: string[] = [];
+  // Böen gegen Grundwind nach Marvins Matrix (ersetzt Böenabstand und Böenfaktor)
   const parts: { s: number; why: string }[] = [
     { s: curve(cfg.shear.shear, m.shearPerKm), why: `Windscherung ${de1(m.shearPerKm)} m/s pro km` },
-    { s: curve(cfg.shear.gustSpread, m.gustSpreadKmh), why: `Böen ${r0(m.gustSpreadKmh)} km/h über Mittelwind` },
+    { s: gustTurbulenceScore(m.gustLevel), why: `Böen ${r0(m.gustKmh)} km/h bei ${r0(m.takeoffWindKmh)} km/h Grundwind: ${gustLabel(m.gustLevel)}` },
   ];
-  if (m.gustFactor !== null) {
-    parts.push({ s: curve(cfg.shear.gustFactor, m.gustFactor), why: `Böenfaktor ${de1(m.gustFactor)}` });
-  }
   if (m.wStar >= 0.8) {
     const ratio = m.layerMeanWindKmh / KMH / m.wStar;
     parts.push({ s: curve(cfg.shear.windToThermal, ratio), why: `Wind zerreißt die Bärte (Wind/w* = ${de1(r1(ratio))})` });
@@ -303,6 +305,8 @@ export function checkRules(spot: Spot, hour: HourInput, m: HourMetrics, cfg: Eng
   }
   if (m.gustKmh > spot.maxWindKmh + rules.gustMarginKmh) {
     noGo.push({ code: 'gust', text: `Böen bis ${r0(m.gustKmh)} km/h` });
+  } else if (hour.isDay && m.gustLevel >= 5.75) {
+    noGo.push({ code: 'gust', text: `Böen ${r0(m.gustKmh)} km/h bei ${r0(m.takeoffWindKmh)} km/h Grundwind: viel zu böig` });
   }
   // Starts im Wald oder in Schneisen vertragen weniger Seiten- und Rückenwind
   const directionLimit = spot.needsHeadwind ? rules.minWindForDirectionLaneKmh : rules.minWindForDirectionKmh;
@@ -383,18 +387,52 @@ export function climbOutlook(m: HourMetrics): 'realistisch' | 'begrenzt' | 'unwa
 }
 
 /**
- * Hinweis auf Soaring: klarer Gegenwind aus dem Windfenster, Böen höchstens 35 km/h, wenig Turbulenz.
- * Mit wenig Thermik ist das gutes Soaring; mit kräftiger Thermik ist die Thermik stark winddurchsetzt und eher ruppig.
- * Ob der Hang am Startplatz Soaring hergibt, weiß die Engine noch nicht, deshalb nur als Hinweis.
+ * Soaring-Stunde nach Marvins Antwort (28.11.2026): Gegenwind ab 15 km/h aus höchstens 30° neben der Startrichtung,
+ * geringe Böigkeit, wenig Turbulenz. Für welchen Modus sie mindestens taugt:
+ * - Chill: 15–20 km/h Grundwind, sehr geringe Böigkeit, wenig bis keine Thermik
+ * - Flow: stärker (bis etwa 20/30) oder etwas böiger
+ * - Push: sehr kräftig (ab etwa 23 km/h oder Böen über 30) oder Soaring mit Thermik
+ * Die persönlichen Grenzen beim Wind entscheiden dann, ob es für den Piloten passt („abhängig vom Character“).
  */
-export function soaringHint(m: HourMetrics, dims: Record<DimensionKey, DimensionScore>, cfg: EngineConfig): string | null {
+export function soaringMode(m: HourMetrics, dims: Record<DimensionKey, DimensionScore>, cfg: EngineConfig): Goal | null {
   const r = cfg.rules;
-  if (!m.takeoffInSector || m.headwindKmh < r.soaringMinHeadwindKmh || m.gustKmh > r.soaringMaxGustKmh) return null;
-  if (dims.shear_turbulence.score > 3) return null;
-  const wind = `${r0(m.headwindKmh)} km/h Gegenwind, Böen bis ${r0(m.gustKmh)} km/h`;
-  if (dims.thermic_character.score <= 1.5) return `Soaringbedingungen möglich: ${wind}, wenig Thermik. Prüfe vor Ort, ob der Hang Soaring hergibt.`;
-  if (dims.thermic_character.score >= 2.5) return `Thermisches Soaring: ${wind}, die Thermik ist stark winddurchsetzt und eher ruppig.`;
-  return `Soaring mit etwas Thermik: ${wind}.`;
+  if (!m.takeoffInSector || m.takeoffWindKmh < r.soaringMinHeadwindKmh || m.gustKmh > r.soaringMaxGustKmh) return null;
+  if (offFacingDeg(m) > 30 || m.gustLevel > 2.5 || dims.shear_turbulence.score > 3) return null;
+  if (dims.thermic_character.score >= 2) return 'xc';
+  if (m.takeoffWindKmh >= 23 || m.gustKmh > 30) return 'xc';
+  if (m.takeoffWindKmh > 20 || m.gustKmh > 25 || m.gustLevel >= 1.5 || dims.thermic_character.score > 1.5) return 'progress';
+  return 'chill';
+}
+
+/** Winkel zwischen Wind am Start und Startrichtung (0 = genau von vorn) */
+export function offFacingDeg(m: HourMetrics): number {
+  if (m.takeoffWindKmh <= 0) return 0;
+  return Math.round((Math.atan2(m.crosswindKmh, m.headwindKmh) * 180) / Math.PI);
+}
+
+const SOAR_TEXT: Record<Goal, string> = {
+  chill: 'ruhiges Soaring, passt auch für Chill',
+  progress: 'kräftiges Soaring, eher Flow',
+  xc: 'sehr kräftiges oder thermisches Soaring, eher Push',
+};
+
+/** Hinweise: Soaring mit Modus, und woher deutliche Böen kommen können */
+export function windHints(m: HourMetrics, dims: Record<DimensionKey, DimensionScore>, spot: Spot): string[] {
+  const out: string[] = [];
+  if (m.soaringMode) {
+    out.push(`Soaringbedingungen: ${r0(m.headwindKmh)} km/h Gegenwind, Böen bis ${r0(m.gustKmh)} km/h, ${SOAR_TEXT[m.soaringMode]}. Prüfe, ob der Hang Soaring hergibt.`);
+  }
+  if (m.gustKmh - m.takeoffWindKmh >= 10) {
+    const causes: string[] = [];
+    if (m.shearPerKm >= 4) causes.push('Windscherung');
+    if (dims.thermic_character.score >= 1.5) causes.push('thermische Turbulenz');
+    if (m.windAboveKmh >= 10 && !inSector(m.windAboveDir, spot.windSector)) causes.push('Lee');
+    if (m.cape >= 300) causes.push('Schauer- oder Gewitterböen');
+    if (causes.length === 0) causes.push('Düsen oder Geländeeffekte, oder das Modell überschätzt die Böen');
+    const low = m.takeoffWindKmh < 10 ? ' Bei schwachem Grundwind heißt das vor allem: wechselnde Windrichtung am Start.' : '';
+    out.push(`Böen deutlich über dem Grundwind, hinterfragen. Mögliche Ursache: ${causes.join(', ')}.${low}`);
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
