@@ -14,7 +14,7 @@ export function evaluateHour(spot: Spot, hour: HourInput, pilot: PilotProfile, c
   const { noGo, warnings } = checkRules(spot, hour, metrics, cfg);
   const { zone, label } = classifyZone(dimensions, noGo, cfg);
   metrics.soaringMode = zone === 'no-go' ? null : soaringMode(metrics, dimensions, cfg);
-  const fit = personalFit(dimensions, zone, noGo, pilot, metrics);
+  const fit = personalFit(dimensions, zone, noGo, pilot, metrics, spot.id);
   const hints = zone === 'no-go' ? [] : windHints(metrics, dimensions, spot);
   return { time: hour.time, isDay: hour.isDay, metrics, dimensions, noGo, warnings, hints, zone, zoneLabel: label, fit, summary: summarize(spot, metrics, dimensions, noGo, label) };
 }
@@ -60,6 +60,6 @@ export function evaluateForecast(
  * Die Wetterbewertung (Kennwerte, Dimensionen, No-Go, Zone) hängt nicht vom Profil ab und bleibt, wie sie ist.
  */
 export function rescoreForPilot(ev: SpotEvaluation, pilot: PilotProfile, cfg: EngineConfig = DEFAULT_CONFIG): SpotEvaluation {
-  const hours = ev.hours.map((h) => ({ ...h, fit: personalFit(h.dimensions, h.zone, h.noGo, pilot, h.metrics) }));
+  const hours = ev.hours.map((h) => ({ ...h, fit: personalFit(h.dimensions, h.zone, h.noGo, pilot, h.metrics, ev.spot.id) }));
   return { ...ev, hours, days: summarizeDays(hours, cfg) };
 }

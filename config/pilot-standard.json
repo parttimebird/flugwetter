@@ -2,7 +2,8 @@
   "pilot_id": "standard",
   "comfort_profile": {
     "base_model": "community",
-    "pilot_profile": "progress",
+    "pilot_profile": "flow",
+    "xc": false,
     "tolerance": {
       "wind_comfort": {
         "max_score_acceptable": 4,
@@ -26,14 +27,15 @@
         "thermic_character_min": 1,
         "wind_comfort_max": 3
       },
-      "progress": {
-        "thermic_character_min": 2,
-        "shear_turbulence_max": 4
+      "flow": {
+        "thermic_character_min": 1.5
+      },
+      "push": {
+        "thermic_character_min": 2
       },
       "xc": {
-        "thermic_character_min": 3,
-        "wind_comfort_max": 5,
-        "shear_turbulence_max": 5
+        "thermic_character_min": 2.5,
+        "structure_cap_min": 2.5
       }
     }
   }

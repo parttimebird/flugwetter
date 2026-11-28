@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { gustLabel, gustLevel } from '../src/wind.ts';
 import { soaringMode } from '../src/evaluate.ts';
+import { sunPosition } from '../src/physics.ts';
 import { goalsMet } from '../src/profile.ts';
 import { DEFAULT_CONFIG } from '../src/config.ts';
 import type { DimensionKey, DimensionScore, HourMetrics } from '../src/types.ts';
@@ -41,23 +42,39 @@ function dims(thermal: number, shear = 1): Record<DimensionKey, DimensionScore> 
 }
 
 function soar(base: number, gust: number): HourMetrics {
-  return { takeoffWindKmh: base, headwindKmh: base, crosswindKmh: 0, gustKmh: gust, takeoffInSector: true, gustLevel: gustLevel(base, gust) } as HourMetrics;
+  return { takeoffWindKmh: base, headwindKmh: base, crosswindKmh: 0, gustKmh: gust, takeoffInSector: true, gustLevel: gustLevel(base, gust), sunOnSlope: false } as HourMetrics;
 }
 
 test('Soaring: Chill bei 15–20 km/h laminar ohne Thermik, Flow stärker, Push sehr kräftig oder thermisch', () => {
   assert.equal(soaringMode(soar(17, 20), dims(0.5), DEFAULT_CONFIG), 'chill');
-  assert.equal(soaringMode(soar(21, 28), dims(0.5), DEFAULT_CONFIG), 'progress');
-  assert.equal(soaringMode(soar(25, 30), dims(0.5), DEFAULT_CONFIG), 'xc');
-  assert.equal(soaringMode(soar(17, 22), dims(2.5), DEFAULT_CONFIG), 'xc');
+  assert.equal(soaringMode(soar(21, 28), dims(0.5), DEFAULT_CONFIG), 'flow');
+  assert.equal(soaringMode(soar(25, 30), dims(0.5), DEFAULT_CONFIG), 'push');
+  assert.equal(soaringMode(soar(17, 22), dims(2.5), DEFAULT_CONFIG), 'push');
   assert.equal(soaringMode(soar(10, 14), dims(0.5), DEFAULT_CONFIG), null);
   // zu böig ist kein Soaring
   assert.equal(soaringMode(soar(15, 32), dims(0.5), DEFAULT_CONFIG), null);
 });
 
-test('Soaring-Stunden erfüllen ihren Modus auch ohne Thermik', () => {
+test('Sonne auf dem Hang macht Soaring eine Stufe lebhafter', () => {
+  assert.equal(soaringMode({ ...soar(17, 20), sunOnSlope: true }, dims(0.5), DEFAULT_CONFIG), 'flow');
+  assert.equal(soaringMode({ ...soar(21, 28), sunOnSlope: true }, dims(0.5), DEFAULT_CONFIG), 'push');
+});
+
+test('Sonnenstand: Mittag im Süden, Westhang am Nachmittag in der Sonne', () => {
+  const noon = sunPosition(47.9, 7.9, '2026-06-21T13:00');
+  assert.ok(noon.azimuth > 150 && noon.azimuth < 200, `Azimut ${noon.azimuth}`);
+  assert.ok(noon.elevation > 60 && noon.elevation < 67, `Höhe ${noon.elevation}`);
+  const morning = sunPosition(47.9, 7.9, '2026-06-21T09:00');
+  assert.ok(morning.azimuth > 70 && morning.azimuth < 110, `Azimut ${morning.azimuth}`);
+  const evening = sunPosition(47.9, 7.9, '2026-06-21T17:00');
+  assert.ok(evening.azimuth > 240 && evening.azimuth < 280, `Azimut ${evening.azimuth}`);
+  assert.ok(sunPosition(47.9, 7.9, '2026-11-28T12:00').elevation < 25);
+});
+
+test('Soaring-Stunden erfüllen ihren Modus auch ohne Thermik, Chill nur bei ruhigem Soaring', () => {
   const pilot = loadPilot();
   const m = { ...soar(17, 20), soaringMode: 'chill' } as HourMetrics;
-  assert.deepEqual(goalsMet(dims(0.3), pilot, m), ['chill', 'progress', 'xc']);
-  const flow = { ...soar(21, 28), soaringMode: 'progress' } as HourMetrics;
-  assert.ok(!goalsMet(dims(0.3), pilot, flow).includes('chill') || pilot.comfort_profile.min_required_scores_for_goal.chill.thermic_character_min === undefined);
+  assert.deepEqual(goalsMet(dims(0.3), pilot, m, 'lively'), ['chill', 'flow', 'push']);
+  const flow = { ...soar(21, 28), soaringMode: 'flow' } as HourMetrics;
+  assert.deepEqual(goalsMet(dims(0.3), pilot, flow, 'lively'), ['flow', 'push']);
 });

@@ -7,10 +7,11 @@
 import type { CrosswindTolerance, DimensionKey, EnvelopeLimits, Goal, LaunchPrefs, TailwindTolerance } from './types.ts';
 
 /**
- * Flugstil: was du am Fliegen suchst. Er bestimmt den Tagesmodus zum Start und welche Luft dir gefällt, aber nie deine
- * Grenzen. Die kommen nur aus Technik, Sicherheitsgefühl, Schirm und Flugpraxis („Wollen verschiebt kein Können“).
+ * Flugstil: was du am Fliegen suchst, als Vogel (Marvins Wahl vom 28.11.2026). Er bestimmt den Tagesmodus zum Start,
+ * ob die Strecken-Option an ist und welche Luft dir gefällt, aber nie deine Grenzen. Die kommen nur aus Technik,
+ * Sicherheitsgefühl, Schirm und Flugpraxis („Wollen verschiebt kein Können“).
  */
-export type FlightStyle = 'butter' | 'community' | 'explorer' | 'learner' | 'xc' | 'hikefly';
+export type FlightStyle = 'gull' | 'sparrow' | 'swallow' | 'raven' | 'stork' | 'chough';
 /** Mit dem eigenen Schirm vertraut und sicher? */
 export type Familiarity = 'yes' | 'partly' | 'no';
 export type WingClass = 'A' | 'B' | 'C' | 'D';
@@ -19,6 +20,9 @@ export type Currency = 'low' | 'mid' | 'high';
 export type SkillLevel = 'foundation' | 'basic' | 'solid' | 'high';
 export type SafetyLevel = 'high_stress' | 'mixed' | 'stable';
 export type Envelope = Record<DimensionKey, EnvelopeLimits>;
+
+/** Schlüssel der optionalen Vorlieben (0 = trifft gar nicht zu, 5 = trifft voll zu; fehlt = neutral) */
+export type PrefKey = 'long_thermals' | 'cloud_reading' | 'blue_ok' | 'avoid_shading' | 'house_hill' | 'glides' | 'go_xc';
 
 export interface CharacterAnswers {
   style: FlightStyle;
@@ -36,62 +40,93 @@ export interface CharacterAnswers {
   skills: Record<string, number>;
   /** Zustimmung 0 bis 5 je Aussage (Schlüssel aus SAFETY_QUESTIONS) */
   safety: Record<string, number>;
+  /** optionale Vorlieben; sie verschieben nie Grenzen, nur wie gut dir eine Stunde gefällt */
+  prefs?: Partial<Record<PrefKey, number>>;
   /** Zeitpunkt des Einlesens (ISO) */
   createdAt?: string;
 }
 
-export const STYLE_OPTIONS: { id: FlightStyle; title: string; subtitle: string; text: string; mode: Goal }[] = [
+export const STYLE_OPTIONS: { id: FlightStyle; title: string; subtitle: string; text: string; mode: Goal; xc?: boolean }[] = [
   {
-    id: 'butter',
-    title: 'Butter-Typ',
-    subtitle: 'entspannte:r Genussflieger:in',
-    text: 'Du magst ruhige, gut einschätzbare Bedingungen. Du fliegst aus Spaß und Genuss. Die Luft darf dabei gern so zart sein wie zimmerwarme Butter.',
+    id: 'gull',
+    title: 'Möwe',
+    subtitle: 'Genussflieger:in',
+    text: 'Du lässt dich tragen: ruhige, gut einschätzbare Luft, Fliegen aus Spaß und Genuss. Die Luft darf gern so zart sein wie zimmerwarme Butter.',
     mode: 'chill',
   },
   {
-    id: 'community',
-    title: 'Kaffee-oder-Tee-Typ',
+    id: 'sparrow',
+    title: 'Spatz',
     subtitle: 'Community-Flieger:in',
-    text: 'Die Zeit mit anderen Piloten, Austausch und gemeinsame Flugtage gehören für dich fest dazu. Die Luft darf ruhig bis moderat sein.',
-    mode: 'chill',
+    text: 'Nie allein: Die Zeit mit anderen Piloten, Austausch und gemeinsame Flugtage gehören für dich fest dazu. Die Luft darf ruhig bis moderat sein.',
+    mode: 'flow',
   },
   {
-    id: 'explorer',
-    title: 'Pralinenschachtel-Typ',
+    id: 'swallow',
+    title: 'Schwalbe',
     subtitle: 'Landschafts-Entdecker:in',
-    text: 'Du suchst neue Aussichten und Gebiete und fliegst gern in bewegter Luft.',
-    mode: 'progress',
+    text: 'Immer woanders: Du suchst neue Aussichten und Gebiete und fliegst gern in bewegter Luft.',
+    mode: 'flow',
   },
   {
-    id: 'learner',
-    title: 'Erdnussbutter-Typ',
+    id: 'raven',
+    title: 'Rabe',
     subtitle: 'entwicklungsorientiert',
-    text: 'Du beschäftigst dich bewusst mit Technik, Thermik und Entscheidungen und nutzt Herausforderungen, um zu lernen und deinen Horizont zu erweitern.',
-    mode: 'progress',
+    text: 'Neugierig und clever: Du beschäftigst dich bewusst mit Technik, Thermik und Entscheidungen und nutzt Herausforderungen, um zu lernen.',
+    mode: 'push',
   },
   {
-    id: 'xc',
-    title: 'Dreiecksbrötchen-Typ',
-    subtitle: 'Punktesammler:in',
-    text: 'Fliegen ist Routine für dich, dir geht es um Strecke.',
-    mode: 'xc',
+    id: 'stork',
+    title: 'Storch',
+    subtitle: 'Streckenflieger:in',
+    text: 'Zieht weit: Fliegen ist Routine für dich, dir geht es um Strecke. Die Strecken-Option ist bei dir von Anfang an an.',
+    mode: 'flow',
+    xc: true,
   },
   {
-    id: 'hikefly',
-    title: 'Snack-Typ',
+    id: 'chough',
+    title: 'Alpendohle',
     subtitle: 'Hike & Fly',
-    text: 'Der Zustieg gehört dazu: Bewegung, Natur und Fliegen als Gesamtpaket. Ein ruhiges bis moderates Flugfenster ist dir wichtig.',
-    mode: 'chill',
+    text: 'Zu Fuß am Gipfel zu Hause: Zustieg, Bewegung, Natur und Fliegen als Gesamtpaket. Ein ruhiges bis moderates Flugfenster ist dir wichtig.',
+    mode: 'flow',
   },
 ];
 
-/** Flugstile aus Schritt 3 auf die neuen Typen abbilden (gespeicherte Profile) */
-const LEGACY_STYLE: Record<string, FlightStyle> = { relaxed: 'butter', scenery: 'explorer', progress: 'learner' };
+/** Flugstile aus Schritt 3 und aus der ersten Fassung des Änderungskonzepts auf die Vögel abbilden (gespeicherte Profile) */
+const LEGACY_STYLE: Record<string, FlightStyle> = {
+  relaxed: 'gull',
+  scenery: 'swallow',
+  progress: 'raven',
+  butter: 'gull',
+  community: 'sparrow',
+  explorer: 'swallow',
+  learner: 'raven',
+  xc: 'stork',
+  hikefly: 'chough',
+};
 
 export function normalizeStyle(style: string): FlightStyle {
   if (STYLE_OPTIONS.some((o) => o.id === style)) return style as FlightStyle;
-  return LEGACY_STYLE[style] ?? 'butter';
+  return LEGACY_STYLE[style] ?? 'gull';
 }
+
+/** Tagesmodi vor dem 28.11.2026 (chill/progress/xc) auf Chill/Flow/Push abbilden; xc schaltet die Strecken-Option an */
+export function normalizeMode(mode: string): { mode: Goal; xc: boolean } {
+  if (mode === 'chill' || mode === 'flow' || mode === 'push') return { mode, xc: false };
+  if (mode === 'progress') return { mode: 'flow', xc: false };
+  if (mode === 'xc') return { mode: 'push', xc: true };
+  return { mode: 'flow', xc: false };
+}
+
+export const PREF_QUESTIONS: { id: PrefKey; label: string; effect: string }[] = [
+  { id: 'long_thermals', label: 'Ich will lange oben bleiben und Thermik nutzen.', effect: 'Stunden ohne nutzbare Thermik gefallen dir weniger.' },
+  { id: 'glides', label: 'Ein ruhiger Abgleiter ist für mich ein schöner Flug.', effect: 'Chill und Flow brauchen bei dir keine Thermik.' },
+  { id: 'cloud_reading', label: 'Ich lese Quellwolken gut und sehe, wenn sie überentwickeln.', effect: 'Wenig: Tage mit wachsenden Quellwolken gefallen dir weniger.' },
+  { id: 'blue_ok', label: 'Blauthermik ohne Wolken als Wegweiser mag ich.', effect: 'Wertet Blauthermik bei Push und Strecke für dich auf oder ab.' },
+  { id: 'avoid_shading', label: 'Abschattung durch hohe Wolken stört mich sehr.', effect: 'Bei Strecke zählen abgeschattete Stunden weniger.' },
+  { id: 'go_xc', label: 'Ich will Strecke fliegen, sobald es geht.', effect: 'Die Strecken-Option ist bei dir von Anfang an an.' },
+  { id: 'house_hill', label: 'Ich fliege meist an meinem Hausberg.', effect: 'Die App schlägt dir vor, Startplätze als Favoriten zu markieren.' },
+];
 
 export const FAMILIAR_OPTIONS: { id: Familiarity; title: string; text: string }[] = [
   { id: 'yes', title: 'Ja', text: 'Ich kenne meinen Schirm und mein Gurtzeug gut und fühle mich darauf sicher.' },
@@ -208,9 +243,12 @@ export interface CharacterResult {
   /** wie die Grenzen zustande kommen, in Sätzen */
   adjustments: string[];
   defaultMode: Goal;
-  /** Push passt laut Character (Technik ab „solide“ und kein erhöhtes Stressniveau) */
-  xcAdvised: boolean;
-  xcReason: string;
+  /** Strecken-Option zum Start an (Storch oder Vorliebe „Strecke, sobald es geht“) */
+  defaultXc: boolean;
+  /** Push darf bis in die Challenge-Zone reichen (Technik ab „solide“ und kein erhöhtes Stressniveau), sonst bis Progress */
+  pushAdvised: boolean;
+  /** warum Push nur bis Progress reicht (leer, wenn pushAdvised) */
+  pushReason: string;
   /** Startbedingungen, mit denen die Engine rechnet (gesperrte Fragen zählen als „nein“) */
   launch: LaunchPrefs;
   crosswindUnlocked: boolean;
@@ -302,10 +340,14 @@ export function buildEnvelope(
   return { envelope, adjustments };
 }
 
-/** Tagesmodus zum Start nach Flugstil. Push nur, wenn der Character es hergibt, sonst Flow. */
-export function defaultModeFor(style: FlightStyle, xcAdvised = true): Goal {
-  const mode = STYLE_OPTIONS.find((o) => o.id === normalizeStyle(style))?.mode ?? 'chill';
-  return mode === 'xc' && !xcAdvised ? 'progress' : mode;
+/** Tagesmodus zum Start nach Flugstil. Die Grenzen bleiben davon unberührt. */
+export function defaultModeFor(style: FlightStyle | string): Goal {
+  return STYLE_OPTIONS.find((o) => o.id === normalizeStyle(style))?.mode ?? 'flow';
+}
+
+/** Strecken-Option zum Start: Storch, oder die Vorliebe „Strecke, sobald es geht“ ab 4 von 5 */
+export function defaultXcFor(style: FlightStyle | string, prefs?: CharacterAnswers['prefs']): boolean {
+  return STYLE_OPTIONS.find((o) => o.id === normalizeStyle(style))?.xc === true || (prefs?.go_xc ?? 0) >= 4;
 }
 
 /**
@@ -321,6 +363,18 @@ export function tailwindUnlocked(skill: SkillLevel, safety: SafetyLevel, currenc
   return skill === 'high' && currency === 'high' && familiar === 'yes' && safety === 'stable';
 }
 
+const scoreCache = new WeakMap<CharacterAnswers, CharacterResult>();
+
+/** wie scoreCharacter, aber pro Antwort-Objekt nur einmal gerechnet (die Engine fragt es für jede Stunde) */
+export function characterOf(a: CharacterAnswers): CharacterResult {
+  let r = scoreCache.get(a);
+  if (!r) {
+    r = scoreCharacter(a);
+    scoreCache.set(a, r);
+  }
+  return r;
+}
+
 export function scoreCharacter(a: CharacterAnswers): CharacterResult {
   const skillTotal = sum(a.skills, SKILL_QUESTIONS);
   const safetyTotal = sum(a.safety, SAFETY_QUESTIONS);
@@ -330,12 +384,12 @@ export function scoreCharacter(a: CharacterAnswers): CharacterResult {
   const { envelope, adjustments } = buildEnvelope(skill.level, safety.level, a.wing, a.currency, familiar);
   const lowSkill = skill.level === 'foundation' || skill.level === 'basic';
   const stressed = safety.level === 'high_stress';
-  const xcAdvised = !lowSkill && !stressed;
-  const xcReason = xcAdvised
+  const pushAdvised = !lowSkill && !stressed;
+  const pushReason = pushAdvised
     ? ''
     : lowSkill
-      ? `Dein Technik-Score liegt bei ${skillTotal} von 50, Push empfiehlt der Coach ab 31.`
-      : `Dein Sicherheits-Score liegt bei ${safetyTotal} von 40, Push empfiehlt der Coach ab 21.`;
+      ? `Dein Technik-Score liegt bei ${skillTotal} von 50, bis in die Challenge-Zone empfiehlt der Coach Push ab 31.`
+      : `Dein Sicherheits-Score liegt bei ${safetyTotal} von 40, bis in die Challenge-Zone empfiehlt der Coach Push ab 21.`;
   const cwOpen = crosswindUnlocked(skill.level, safety.level, a.currency, familiar);
   const twOpen = tailwindUnlocked(skill.level, safety.level, a.currency, familiar);
   const launch: LaunchPrefs = {
@@ -352,9 +406,10 @@ export function scoreCharacter(a: CharacterAnswers): CharacterResult {
     safetyLabel: safety.label,
     envelope,
     adjustments,
-    defaultMode: defaultModeFor(a.style, xcAdvised),
-    xcAdvised,
-    xcReason,
+    defaultMode: defaultModeFor(a.style),
+    defaultXc: defaultXcFor(a.style, a.prefs),
+    pushAdvised,
+    pushReason,
     launch,
     crosswindUnlocked: cwOpen,
     tailwindUnlocked: twOpen,

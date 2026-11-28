@@ -22,9 +22,9 @@ test('Ruhiger Thermiktag mit Deckel: gut nutzbar, glatt, kein No-Go', () => {
   assert.ok(h.dimensions.thermic_character.score >= 2 && h.dimensions.thermic_character.score <= 3.8);
   assert.ok(h.dimensions.wind_comfort.score <= 1.5);
   assert.ok(h.dimensions.shear_turbulence.score <= 2, `Scherung ${h.dimensions.shear_turbulence.score}`);
-  assert.ok(['progress', 'xc'].includes(h.zone), h.zoneLabel);
+  assert.ok(['lively', 'xc'].includes(h.zone), h.zoneLabel);
   assert.ok(h.fit.score >= 80, `Passung ${h.fit.score}`);
-  assert.ok(h.fit.goalsMet.includes('progress'));
+  assert.ok(h.fit.goalsMet.includes('flow'));
 });
 
 test('Starker Höhenwind über guter Thermik: windig, zerrissen, No-Go', () => {
@@ -121,7 +121,7 @@ test('Nacht und Regen sind immer No-Go', () => {
   assert.ok(rain.noGo.some((r) => r.code === 'precip'));
 });
 
-test('Soaring-Wind ohne Thermik ist Progress, nicht Chill', () => {
+test('Soaring-Wind ohne Thermik ist lebhafte Luft, nicht ruhig', () => {
   const h = evaluateHour(
     TEST_SPOT,
     syntheticHour({
@@ -135,7 +135,7 @@ test('Soaring-Wind ohne Thermik ist Progress, nicht Chill', () => {
     pilot,
   );
   assert.equal(h.noGo.length, 0, JSON.stringify(h.noGo));
-  assert.equal(h.zone, 'progress', h.zoneLabel);
+  assert.equal(h.zone, 'lively', h.zoneLabel);
 });
 
 test('Persönliche Toleranz senkt die Passung', () => {

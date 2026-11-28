@@ -3,12 +3,30 @@
 
 export type DimensionKey = 'wind_comfort' | 'thermic_character' | 'shear_turbulence' | 'structure_cap';
 /** Lufttyp aus dem Wetter allein (ruhig, lebhaft, Streckenwetter, No-Go), unabhängig vom Piloten. */
-export type Zone = 'chill' | 'progress' | 'xc' | 'no-go';
+export type Zone = 'calm' | 'lively' | 'xc' | 'no-go';
 /**
- * Tagesmodus des Piloten. Angezeigt als Chill, Flow und Push (bis Schritt 3 hießen sie Chill, Progress und XC; die
- * internen Schlüssel bleiben, damit gespeicherte Profile weiter gelten).
+ * Tagesmodus des Piloten (seit 28.11.2026; vorher chill/progress/xc, gespeicherte Profile werden umgeschrieben):
+ * - chill: ruhige, einfache Luft in deiner Komfort-Zone
+ * - flow: deine ganze Komfort-Zone; Bedingungen, die du kennst und die dich nicht überfordern
+ * - push: bewusst fordernd, bis in deine Progress-Zone, mit passendem Character bis in die Challenge-Zone
+ * Strecke (XC) ist kein Modus, sondern eine eigene Option zu jedem Modus (`comfort_profile.xc`).
  */
-export type Goal = 'chill' | 'progress' | 'xc';
+export type Goal = 'chill' | 'flow' | 'push';
+
+/** Mindestanforderungen eines Modus oder der Strecken-Option (Skala 0 bis 5) */
+export interface GoalRequirements {
+  thermic_character_min?: number;
+  wind_comfort_max?: number;
+  shear_turbulence_max?: number;
+  structure_cap_min?: number;
+}
+
+/** Persönliche Startbedingungen für einen bestimmten Startplatz */
+export interface SpotLaunchPrefs {
+  crosswind?: CrosswindTolerance;
+  /** Böen höchstens (km/h) an diesem Startplatz */
+  maxGustKmh?: number;
+}
 
 /** Seitenwind am Start: nein = nur Gegenwind, leicht = schwacher Seitenwind, ja = was der Startplatz hergibt */
 export type CrosswindTolerance = 'no' | 'light' | 'yes';
@@ -21,9 +39,11 @@ export interface LaunchPrefs {
   tailwind: TailwindTolerance;
   /** Rückwärtsaufziehen sicher? undefined = nicht gefragt (Standardprofil) */
   reverseLaunch?: boolean;
+  /** Böen höchstens (km/h), nur pro Startplatz gesetzt */
+  maxGustKmh?: number;
 }
 /**
- * Persönliche Zone einer Stunde: grün = Komfort, gelb = Progress, orange = XC-Challenge, rot = Überforderung.
+ * Persönliche Zone einer Stunde: grün = Komfort, gelb = Progress, orange = Challenge, rot = Überforderung.
  * 'no-go' heißt: nach den festen Regeln nicht fliegbar (Nacht, Regen, falsche Windrichtung …), für jeden Piloten.
  */
 export type PersonalZone = 'green' | 'yellow' | 'orange' | 'red' | 'no-go';
@@ -220,6 +240,11 @@ export interface HourMetrics {
   cloudCover: number;
   cloudHigh: number;
   swRad: number;
+  /** Sonnenstand: Azimut (Grad ab Nord) und Höhe (Grad) */
+  sunAzimuth: number;
+  sunElevation: number;
+  /** Sonne scheint kräftig auf den Hang des Startplatzes (lokal thermisch) */
+  sunOnSlope: boolean;
 }
 
 export interface FitResult {
@@ -230,6 +255,8 @@ export interface FitResult {
   personalZone: PersonalZone;
   /** Tagesmodus, für den die Passung berechnet wurde */
   mode: Goal;
+  /** Strecken-Option war an */
+  xc: boolean;
   /** Überschreitung der persönlichen Toleranz pro Dimension */
   exceed: Partial<Record<DimensionKey, number>>;
   goalsMet: Goal[];
@@ -297,10 +324,14 @@ export interface PilotProfile {
   character?: import('./character.ts').CharacterAnswers;
   /** persönliche Startbedingungen; fehlen sie, gilt das vorsichtige Standard: kein Seiten- und kein Rückenwind */
   launch?: LaunchPrefs;
+  /** eigene Startbedingungen pro Startplatz (Schlüssel: Startplatz-id) */
+  spot_launch?: Record<string, SpotLaunchPrefs>;
   comfort_profile: {
     base_model: string;
     /** gewählter Tagesmodus */
     pilot_profile: Goal;
+    /** Strecken-Option (XC): verlangt Thermik und Arbeitshöhe über mindestens drei Stunden */
+    xc?: boolean;
     /**
      * Gewicht pro Dimension. `max_score_acceptable` ist die alte Einzelgrenze; gibt es `envelope`, zählt das,
      * sonst wird daraus die Progress-Grenze (Komfort 0,5 darunter, Challenge 0,5 darüber).
@@ -308,14 +339,7 @@ export interface PilotProfile {
     tolerance: Record<DimensionKey, { max_score_acceptable: number; importance_weight: number }>;
     /** persönliche Zonen-Grenzen pro Dimension */
     envelope?: Record<DimensionKey, EnvelopeLimits>;
-    min_required_scores_for_goal: Record<
-      Goal,
-      {
-        thermic_character_min?: number;
-        wind_comfort_max?: number;
-        shear_turbulence_max?: number;
-        structure_cap_min?: number;
-      }
-    >;
+    /** Mindestanforderungen je Modus und für die Strecken-Option */
+    min_required_scores_for_goal: Record<Goal | 'xc', GoalRequirements>;
   };
 }

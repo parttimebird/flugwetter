@@ -71,6 +71,9 @@ export interface EngineConfig {
     /** Soaring-Hinweis ab diesem Gegenwind (km/h) und bis zu diesen Böen (km/h) */
     soaringMinHeadwindKmh: number;
     soaringMaxGustKmh: number;
+    /** Sonne auf dem Hang: ab dieser Sonnenhöhe (Grad) und Einstrahlung (W/m²) gilt der Hang als lokal thermisch */
+    slopeSunMinElevationDeg: number;
+    slopeSunMinRadiation: number;
   };
   zones: {
     noGoWind: number;
@@ -80,9 +83,9 @@ export interface EngineConfig {
     xcStructure: number;
     xcMaxWind: number;
     xcMaxShear: number;
-    progressThermal: number;
-    progressWind: number;
-    progressShear: number;
+    livelyThermal: number;
+    livelyWind: number;
+    livelyShear: number;
   };
   /** Stunden mit persönlicher Passung ab diesem Wert bilden ein Flugfenster */
   windowMinFit: number;
@@ -203,6 +206,8 @@ export const DEFAULT_CONFIG: EngineConfig = {
     strongInversionK: 2,
     soaringMinHeadwindKmh: 15,
     soaringMaxGustKmh: 35,
+    slopeSunMinElevationDeg: 15,
+    slopeSunMinRadiation: 300,
   },
   zones: {
     noGoWind: 4.5,
@@ -212,9 +217,9 @@ export const DEFAULT_CONFIG: EngineConfig = {
     xcStructure: 2.5,
     xcMaxWind: 3.5,
     xcMaxShear: 3.5,
-    progressThermal: 1.8,
-    progressWind: 2.5,
-    progressShear: 2.8,
+    livelyThermal: 1.8,
+    livelyWind: 2.5,
+    livelyShear: 2.8,
   },
   windowMinFit: 60,
 };

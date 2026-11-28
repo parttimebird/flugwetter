@@ -21,6 +21,7 @@ import {
   inSector,
   liftParcel,
   rhFromDewPoint,
+  sunPosition,
   sunTimes,
   windAt,
 } from './physics.ts';
@@ -123,6 +124,11 @@ export function computeMetrics(spot: Spot, hour: HourInput, cfg: EngineConfig): 
   const tTake = envTemperature(hour.thermo, Math.max(zT, s.z + 2));
   const tdTake = envDewPoint(hour.thermo, Math.max(zT, s.z + 2));
 
+  // Sonne auf dem Hang: Der Startplatz schaut in Richtung `facing` (dorthin, woher der ideale Wind kommt). Steht die
+  // Sonne in diesem Halbkreis (±60°) hoch genug und scheint sie kräftig, heizt sie den Hang lokal auf.
+  const sun = sunPosition(spot.lat, spot.lon, hour.time);
+  const sunOnSlope = hour.isDay && sun.elevation >= cfg.rules.slopeSunMinElevationDeg && s.swRad >= cfg.rules.slopeSunMinRadiation && angleDiff(sun.azimuth, spot.facing) < 60;
+
   return {
     takeoffWindKmh: r1(wTake.speed * KMH),
     takeoffWindDir: r0(wTake.dir),
@@ -155,6 +161,9 @@ export function computeMetrics(spot: Spot, hour: HourInput, cfg: EngineConfig): 
     cloudCover: s.cloudCover,
     cloudHigh: Math.max(s.cloudHigh, s.cloudMid),
     swRad: r0(s.swRad),
+    sunAzimuth: sun.azimuth,
+    sunElevation: sun.elevation,
+    sunOnSlope,
   };
 }
 
@@ -398,10 +407,14 @@ export function soaringMode(m: HourMetrics, dims: Record<DimensionKey, Dimension
   const r = cfg.rules;
   if (!m.takeoffInSector || m.takeoffWindKmh < r.soaringMinHeadwindKmh || m.gustKmh > r.soaringMaxGustKmh) return null;
   if (offFacingDeg(m) > 30 || m.gustLevel > 2.5 || dims.shear_turbulence.score > 3) return null;
-  if (dims.thermic_character.score >= 2) return 'xc';
-  if (m.takeoffWindKmh >= 23 || m.gustKmh > 30) return 'xc';
-  if (m.takeoffWindKmh > 20 || m.gustKmh > 25 || m.gustLevel >= 1.5 || dims.thermic_character.score > 1.5) return 'progress';
-  return 'chill';
+  let mode: Goal;
+  if (dims.thermic_character.score >= 2) mode = 'push';
+  else if (m.takeoffWindKmh >= 23 || m.gustKmh > 30) mode = 'push';
+  else if (m.takeoffWindKmh > 20 || m.gustKmh > 25 || m.gustLevel >= 1.5 || dims.thermic_character.score > 1.5) mode = 'flow';
+  else mode = 'chill';
+  // Strahlungstag mit Sonne auf dem Hang: lokal thermisch, Ablösungen machen das Soaring eine Stufe lebhafter
+  if (m.sunOnSlope && mode !== 'push') mode = mode === 'chill' ? 'flow' : 'push';
+  return mode;
 }
 
 /** Winkel zwischen Wind am Start und Startrichtung (0 = genau von vorn) */
@@ -412,8 +425,8 @@ export function offFacingDeg(m: HourMetrics): number {
 
 const SOAR_TEXT: Record<Goal, string> = {
   chill: 'ruhiges Soaring, passt auch für Chill',
-  progress: 'kräftiges Soaring, eher Flow',
-  xc: 'sehr kräftiges oder thermisches Soaring, eher Push',
+  flow: 'kräftiges Soaring, eher Flow',
+  push: 'sehr kräftiges oder thermisches Soaring, eher Push',
 };
 
 /** Hinweise: Soaring mit Modus, und woher deutliche Böen kommen können */
@@ -421,6 +434,8 @@ export function windHints(m: HourMetrics, dims: Record<DimensionKey, DimensionSc
   const out: string[] = [];
   if (m.soaringMode) {
     out.push(`Soaringbedingungen: ${r0(m.headwindKmh)} km/h Gegenwind, Böen bis ${r0(m.gustKmh)} km/h, ${SOAR_TEXT[m.soaringMode]}. Prüfe, ob der Hang Soaring hergibt.`);
+    if (m.sunOnSlope) out.push('Sonne auf dem Hang: lokal thermisch, mit Ablösungen am Hang. Das Soaring wird lebhafter als der Wind allein vermuten lässt.');
+    else if (m.swRad >= 300) out.push('Hang im Schatten: trotz Sonne eher laminares Soaring, Thermik eher an sonnigen Nachbarhängen.');
   }
   if (m.gustKmh - m.takeoffWindKmh >= 10) {
     const causes: string[] = [];
@@ -457,12 +472,12 @@ export function classifyZone(
   if (T >= z.xcThermal && D >= z.xcStructure && W <= z.xcMaxWind && S <= z.xcMaxShear) {
     return { zone: 'xc', label: sporty ? 'Streckenwetter, sportlich' : 'Streckenwetter' };
   }
-  if (T >= z.progressThermal || W >= z.progressWind || S >= z.progressShear) {
-    if (sporty) return { zone: 'progress', label: 'lebhaft, sportlich' };
-    if (T < 1.5 && W >= z.progressWind) return { zone: 'progress', label: 'Soaring im Wind' };
-    if (T < 1.5 && S >= z.progressShear) return { zone: 'progress', label: 'unruhige Luft' };
-    return { zone: 'progress', label: 'lebhaft, thermisch' };
+  if (T >= z.livelyThermal || W >= z.livelyWind || S >= z.livelyShear) {
+    if (sporty) return { zone: 'lively', label: 'lebhaft, sportlich' };
+    if (T < 1.5 && W >= z.livelyWind) return { zone: 'lively', label: 'Soaring im Wind' };
+    if (T < 1.5 && S >= z.livelyShear) return { zone: 'lively', label: 'unruhige Luft' };
+    return { zone: 'lively', label: 'lebhaft, thermisch' };
   }
-  if (T < 0.8) return { zone: 'chill', label: 'ruhig, kaum Thermik' };
-  return { zone: 'chill', label: 'ruhig, leichte Thermik' };
+  if (T < 0.8) return { zone: 'calm', label: 'ruhig, kaum Thermik' };
+  return { zone: 'calm', label: 'ruhig, leichte Thermik' };
 }

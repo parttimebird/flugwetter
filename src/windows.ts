@@ -4,9 +4,9 @@ import type { DaySummary, DimensionKey, FlightWindow, HourEvaluation, PersonalZo
 import type { EngineConfig } from './config.ts';
 import { PZONE_NAMES, zoneRank } from './profile.ts';
 
-const ZONE_ORDER: Zone[] = ['no-go', 'chill', 'progress', 'xc'];
-/** Lufttyp (aus dem Wetter allein), bewusst anders benannt als die Tagesmodi Chill, Progress und XC */
-const ZONE_NAMES: Record<Zone, string> = { 'no-go': 'No-Go', chill: 'ruhige Luft', progress: 'lebhafte Luft', xc: 'Streckenwetter' };
+const ZONE_ORDER: Zone[] = ['no-go', 'calm', 'lively', 'xc'];
+/** Lufttyp (aus dem Wetter allein), bewusst anders benannt als die Tagesmodi Chill, Flow und Push */
+const ZONE_NAMES: Record<Zone, string> = { 'no-go': 'No-Go', calm: 'ruhige Luft', lively: 'lebhafte Luft', xc: 'Streckenwetter' };
 
 const NOGO_TEXT: Record<string, string> = {
   night: 'Nacht',
@@ -23,6 +23,9 @@ const NOGO_TEXT: Record<string, string> = {
   lee: 'Lee (Höhenwind von hinten)',
   hours: 'außerhalb der erlaubten Flugzeit',
 };
+
+/** Mindestlänge eines Flugfensters mit Strecken-Option */
+export const XC_MIN_WINDOW_H = 3;
 
 function hourOf(time: string): number {
   return Number(time.slice(11, 13));
@@ -85,6 +88,10 @@ export function summarizeDays(hours: HourEvaluation[], cfg: EngineConfig): DaySu
       }
     }
     if (run.length > 0) windows.push(makeWindow(run));
+    // Strecken-Option: ein Streckenflug braucht Zeit, kürzere Fenster zählen nicht
+    const xc = day.some((h) => h.fit.xc);
+    const shortXc = xc ? windows.filter((w) => w.hours < XC_MIN_WINDOW_H) : [];
+    if (shortXc.length > 0) windows.splice(0, windows.length, ...windows.filter((w) => w.hours >= XC_MIN_WINDOW_H));
 
     const counts = new Map<string, number>();
     for (const h of day) {
@@ -113,6 +120,8 @@ export function summarizeDays(hours: HourEvaluation[], cfg: EngineConfig): DaySu
       verdict = windows
         .map((w) => `${w.start.slice(0, 2)}–${w.end.slice(0, 2)} Uhr ${PZONE_NAMES[w.personalZone]} (Passung bis ${w.fitMax})`)
         .join(', ');
+    } else if (shortXc.length > 0) {
+      verdict = `für Strecke zu kurz: ${shortXc.map((w) => `${w.start.slice(0, 2)}–${w.end.slice(0, 2)} Uhr`).join(', ')} (mindestens ${XC_MIN_WINDOW_H} Stunden)`;
     } else if (bestHour) {
       verdict = `kein Fenster für dich, beste Stunde ${bestHour.time.slice(11, 13)} Uhr: ${PZONE_NAMES[bestHour.fit.personalZone]}, ${bestHour.fit.label}`;
     } else {

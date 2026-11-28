@@ -230,3 +230,35 @@ export function clockTime(hours: number): string {
   const total = Math.round(hours * 60);
   return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
 }
+
+/**
+ * Sonnenstand (NOAA-Näherung, auf etwa ein Grad genau) für eine lokale Zeit `JJJJ-MM-TTTHH:MM`.
+ * Azimut in Grad im Uhrzeigersinn ab Nord (Richtung, in der die Sonne steht), Höhe in Grad über dem Horizont.
+ */
+export function sunPosition(lat: number, lon: number, localTime: string, timeZone = 'Europe/Berlin'): { azimuth: number; elevation: number } {
+  const date = localTime.slice(0, 10);
+  const [y, m, d] = date.split('-').map(Number);
+  const localH = Number(localTime.slice(11, 13)) + Number(localTime.slice(14, 16) || 0) / 60;
+  const dayOfYear = Math.round((Date.UTC(y, m - 1, d) - Date.UTC(y, 0, 0)) / 86400000);
+  const g = ((2 * Math.PI) / 365) * (dayOfYear - 1 + (localH - 12) / 24);
+  const eqTime =
+    229.18 * (0.000075 + 0.001868 * Math.cos(g) - 0.032077 * Math.sin(g) - 0.014615 * Math.cos(2 * g) - 0.040849 * Math.sin(2 * g));
+  const decl =
+    0.006918 -
+    0.399912 * Math.cos(g) +
+    0.070257 * Math.sin(g) -
+    0.006758 * Math.cos(2 * g) +
+    0.000907 * Math.sin(2 * g) -
+    0.002697 * Math.cos(3 * g) +
+    0.00148 * Math.sin(3 * g);
+  const offset = utcOffsetHours(date, timeZone);
+  const trueSolarMin = (localH - offset) * 60 + eqTime + 4 * lon;
+  const ha = ((trueSolarMin / 4 - 180) * Math.PI) / 180;
+  const phi = (lat * Math.PI) / 180;
+  const cosZen = Math.sin(phi) * Math.sin(decl) + Math.cos(phi) * Math.cos(decl) * Math.cos(ha);
+  const zen = Math.acos(Math.max(-1, Math.min(1, cosZen)));
+  const elevation = 90 - (zen * 180) / Math.PI;
+  const az = Math.atan2(Math.sin(ha), Math.cos(ha) * Math.sin(phi) - Math.tan(decl) * Math.cos(phi));
+  const azimuth = ((az * 180) / Math.PI + 180 + 360) % 360;
+  return { azimuth: Math.round(azimuth), elevation: Math.round(elevation * 10) / 10 };
+}

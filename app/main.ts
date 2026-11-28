@@ -6,7 +6,26 @@ import { SITE_LIST, SPOTS } from '../src/spots.ts';
 import { buildUrl, fetchRaw, parseResponse, type OpenMeteoResponse } from '../src/openmeteo.ts';
 import { evaluateForecast, rescoreForPilot } from '../src/engine.ts';
 import { clockTime, compass, sunTimes } from '../src/physics.ts';
-import { DIM_NAMES, GOAL_NAMES, LAUNCH_LIMITS, PZONE_NAMES, dimensionZone, envelopeOf, launchPrefsOf, modeLimit } from '../src/profile.ts';
+import {
+  DIM_NAMES,
+  GOALS,
+  GOAL_NAMES,
+  LAUNCH_LIMITS,
+  PZONE_NAMES,
+  TURBULENCE_EMOJI_TEXT,
+  crosswindAllowed,
+  dimensionZone,
+  envelopeOf,
+  launchPrefsOf,
+  modeLimit,
+  modeZone,
+  pushReachesChallenge,
+  turbulenceEmoji,
+  xcOn,
+} from '../src/profile.ts';
+import { XC_MIN_WINDOW_H } from '../src/windows.ts';
+import { migrateStoredProfile } from '../src/migrate.ts';
+import { FEELINGS, applySuggestion, snapshotOf, spotPattern, suggestFromEntry, type Compare, type DebriefAnswers, type DebriefEntry } from '../src/debrief.ts';
 import { DEFAULT_CONFIG } from '../src/config.ts';
 import { climbOutlook } from '../src/evaluate.ts';
 import { alt100, baseWindClass, capitalize, gustClass, plus100 } from '../src/format.ts';
@@ -15,6 +34,7 @@ import {
   CROSSWIND_OPTIONS,
   CURRENCY_OPTIONS,
   FAMILIAR_OPTIONS,
+  PREF_QUESTIONS,
   REVERSE_OPTIONS,
   SAFETY_QUESTIONS,
   SKILL_QUESTIONS,
@@ -22,6 +42,7 @@ import {
   STYLE_OPTIONS,
   TAILWIND_OPTIONS,
   WING_OPTIONS,
+  normalizeMode,
   normalizeStyle,
   scoreCharacter,
   type CharacterAnswers,
@@ -29,6 +50,7 @@ import {
   type Currency,
   type Familiarity,
   type FlightStyle,
+  type PrefKey,
   type WingClass,
 } from '../src/character.ts';
 import type {
@@ -37,11 +59,13 @@ import type {
   DimensionKey,
   EnvelopeLimits,
   Goal,
+  GoalRequirements,
   HourEvaluation,
   PersonalZone,
   PilotProfile,
   Spot,
   SpotEvaluation,
+  SpotLaunchPrefs,
   TailwindTolerance,
 } from '../src/types.ts';
 
@@ -53,6 +77,14 @@ interface Snapshot {
 }
 type DataMode = 'live' | 'cache' | 'snapshot';
 type View = 'fenster' | 'profil' | 'info' | 'detail' | 'character';
+type ListView = 'umgebung' | 'favoriten' | 'alle';
+/** Standort für „Meine Umgebung“: vom Gerät (GPS) oder ein gewählter Startplatz als Ausgangspunkt */
+interface Position {
+  lat: number;
+  lon: number;
+  source: 'gps' | 'spot';
+  label: string;
+}
 
 // v2: Profil mit Character und Zonen-Grenzen. v1 (Schritt 2) wird beim ersten Start übernommen und bleibt unverändert,
 // damit die alte Fassung der App auf demselben Gerät weiterläuft.
@@ -60,6 +92,11 @@ const PROFILE_KEY = 'flugwetter.profil.v2';
 const LEGACY_PROFILE_KEY = 'flugwetter.profil.v1';
 const CACHE_KEY = 'flugwetter.vorhersage.v1';
 const REGION_KEY = 'flugwetter.region.v1';
+const LIST_KEY = 'flugwetter.liste.v1';
+const FAV_KEY = 'flugwetter.favoriten.v1';
+const POS_KEY = 'flugwetter.standort.v1';
+const RADIUS_KEY = 'flugwetter.umkreis.v1';
+const DEBRIEF_KEY = 'flugwetter.debrief.v1';
 const CACHE_FRESH_MIN = 60;
 const DIM_KEYS: DimensionKey[] = ['wind_comfort', 'thermic_character', 'shear_turbulence', 'structure_cap'];
 const DIM_SHORT: Record<DimensionKey, string> = {
@@ -75,20 +112,22 @@ const REGIONS = [
   { id: 'sued', label: 'Süd', region: 'Südschwarzwald' },
 ];
 const GOAL_HINT: Record<Goal, string> = {
-  chill: 'ruhig, einfach, gut kontrollierbar',
-  progress: 'aktiv, mit ausreichend Spielraum',
-  xc: 'anspruchsvoll und fordernd',
+  chill: 'ruhig, einfach, entspannt',
+  flow: 'kenne ich, überfordert mich nicht',
+  push: 'bewusst fordernd',
 };
 const GOAL_LONG: Record<Goal, string> = {
-  chill: 'Ruhige, einfache und gut kontrollierbare Bedingungen.',
-  progress: 'Gute, aktive Bedingungen mit ausreichend Spielraum.',
-  xc: 'Anspruchsvolle, grenzwertige oder fordernde Bedingungen, zum Beispiel für Strecke: Thermik und Basishöhe über längere Zeit.',
+  chill: 'Ruhige, einfache und gut kontrollierbare Luft: leichte Thermik oder ruhiges Soaring.',
+  flow: 'Bedingungen, die du kennst und die dich nicht überfordern. Du bist in deiner Komfort-Zone und im Flow.',
+  push: 'Bewusst fordernde Bedingungen, in denen du wächst, mit klarer Sicherheitsstrategie.',
 };
-const MODE_ZONE_TEXT: Record<Goal, string> = {
-  chill: 'nur Stunden in deiner Komfort-Zone',
-  progress: 'Stunden bis in deine Progress-Zone',
-  xc: 'Stunden bis in deine Challenge-Zone',
-};
+
+/** Welche Stunden im Modus als Flugfenster zählen */
+function modeZoneText(mode: Goal, pilot: PilotProfile = state.pilot): string {
+  if (mode === 'chill') return 'Stunden mit ruhiger Luft in deiner Komfort-Zone';
+  if (mode === 'flow') return 'alle Stunden in deiner Komfort-Zone';
+  return modeZone(pilot, 'push') === 'orange' ? 'Stunden bis in deine Challenge-Zone' : 'Stunden bis in deine Progress-Zone';
+}
 const ZONES_HINT = 'Diese Zonen wurden aus deinem Flugcharakter und deinen bisherigen Rückmeldungen entwickelt. Sie sind eine Orientierung, keine Festlegung.';
 const LEVEL_NAMES: Record<keyof EnvelopeLimits, string> = { comfort: 'Komfort', progress: 'Progress', challenge: 'Challenge' };
 const DIM_HINT: Record<DimensionKey, string> = {
@@ -107,6 +146,12 @@ const state = {
   spotId: '',
   day: '',
   region: readStore(REGION_KEY) ?? 'alle',
+  list: (readStore(LIST_KEY) as ListView | null) ?? 'alle',
+  favorites: new Set<string>(readJson<string[]>(FAV_KEY) ?? []),
+  position: readJson<Position>(POS_KEY),
+  radiusKm: Number(readStore(RADIUS_KEY)) || 50,
+  geoProblem: '',
+  debriefs: readJson<DebriefEntry[]>(DEBRIEF_KEY) ?? [],
   pilot: loadProfile(),
   mode: null as DataMode | null,
   fetchedAt: '',
@@ -166,6 +211,16 @@ function writeStore(key: string, value: string): void {
   }
 }
 
+function readJson<T>(key: string): T | null {
+  const raw = readStore(key);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
+
 function clone<T>(x: T): T {
   return JSON.parse(JSON.stringify(x)) as T;
 }
@@ -181,11 +236,8 @@ function loadProfile(): PilotProfile {
     try {
       const p = JSON.parse(raw) as PilotProfile;
       if (p?.comfort_profile?.tolerance && p.comfort_profile.min_required_scores_for_goal) {
-        // Flugstile aus Schritt 3 auf die neuen Typen umstellen; Startbedingungen aus dem Character nachtragen
-        if (p.character) {
-          p.character.style = normalizeStyle(p.character.style);
-          p.launch ??= scoreCharacter(p.character).launch;
-        }
+        migrateProfile(p);
+        writeStore(PROFILE_KEY, JSON.stringify(p));
         return p;
       }
     } catch {
@@ -193,6 +245,10 @@ function loadProfile(): PilotProfile {
     }
   }
   return clonePilot(__DEFAULT_PILOT__);
+}
+
+function migrateProfile(p: PilotProfile): void {
+  migrateStoredProfile(p, __DEFAULT_PILOT__);
 }
 
 function saveProfile(): void {
@@ -211,20 +267,21 @@ function chosenMode(): Goal {
   return state.pilot.comfort_profile.pilot_profile;
 }
 
-/** XC rechnet der Coach als Progress, solange der Character dafür noch nicht reicht (Flow-Entwurf: condition_downgrade_xc). */
+/** Der Modus wird nicht mehr herabgestuft: Push reicht je nach Character bis Progress oder bis Challenge. */
 function effectiveMode(): Goal {
-  const mode = chosenMode();
-  const r = characterResult();
-  return mode === 'xc' && r && !r.xcAdvised ? 'progress' : mode;
+  return chosenMode();
 }
 
-/** Profil, mit dem die Engine rechnet: wie gespeichert, nur mit dem tatsächlich wirksamen Modus */
 function scoringPilot(): PilotProfile {
-  const mode = effectiveMode();
-  if (mode === chosenMode()) return state.pilot;
-  const p = clonePilot(state.pilot);
-  p.comfort_profile.pilot_profile = mode;
-  return p;
+  return state.pilot;
+}
+
+function setXc(on: boolean): void {
+  state.pilot.comfort_profile.xc = on;
+  state.flash = '';
+  saveProfile();
+  rescore();
+  render();
 }
 
 function setMode(mode: Goal): void {
@@ -260,6 +317,7 @@ function applyCharacter(answers: CharacterAnswers): void {
   state.pilot.character = { ...answers, createdAt: new Date().toISOString() };
   const r = scoreCharacter(answers);
   state.pilot.comfort_profile.pilot_profile = r.defaultMode;
+  state.pilot.comfort_profile.xc = r.defaultXc;
   state.pilot.launch = clone(r.launch);
   resetZonesFromCharacter();
 }
@@ -451,9 +509,48 @@ function defaultDay(days: string[]): string {
   return days.find((d) => state.evals.some((e) => e.days.find((x) => x.date === d)?.windows.length)) ?? days[0] ?? '';
 }
 
-function regionEvals(): SpotEvaluation[] {
+/** Entfernung in km (Haversine) */
+function distanceKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const rad = Math.PI / 180;
+  const dLat = (lat2 - lat1) * rad;
+  const dLon = (lon2 - lon1) * rad;
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * rad) * Math.cos(lat2 * rad) * Math.sin(dLon / 2) ** 2;
+  return 6371 * 2 * Math.asin(Math.sqrt(a));
+}
+
+function spotDistance(spot: Spot): number | null {
+  const p = state.position;
+  return p ? distanceKm(p.lat, p.lon, spot.lat, spot.lon) : null;
+}
+
+function isFavorite(id: string): boolean {
+  return state.favorites.has(id);
+}
+
+function toggleFavorite(id: string): void {
+  if (state.favorites.has(id)) state.favorites.delete(id);
+  else state.favorites.add(id);
+  writeStore(FAV_KEY, JSON.stringify([...state.favorites]));
+  render();
+}
+
+/** Startplätze der gewählten Liste: Meine Umgebung (im Umkreis), Favoriten oder Alle (mit Region) */
+function listEvals(): SpotEvaluation[] {
+  if (state.list === 'favoriten') return state.evals.filter((e) => isFavorite(e.spot.id));
+  if (state.list === 'umgebung') {
+    if (!state.position) return [];
+    return state.evals.filter((e) => (spotDistance(e.spot) ?? Infinity) <= state.radiusKm);
+  }
   const r = REGIONS.find((x) => x.id === state.region);
   return !r || !r.region ? state.evals : state.evals.filter((e) => e.spot.site.region === r.region);
+}
+
+/** Reihenfolge in einer Gruppe: in Meine Umgebung nach Entfernung, sonst Favoriten zuerst, dann nach Passung */
+function listOrder(a: { ev: SpotEvaluation; day: DaySummary }, b: { ev: SpotEvaluation; day: DaySummary }): number {
+  if (state.list === 'umgebung') return (spotDistance(a.ev.spot) ?? 0) - (spotDistance(b.ev.spot) ?? 0);
+  const fav = Number(isFavorite(b.ev.spot.id)) - Number(isFavorite(a.ev.spot.id));
+  if (state.list === 'alle' && fav !== 0) return fav;
+  return bestFit(b.day) - bestFit(a.day) || windowHours(b.day) - windowHours(a.day);
 }
 
 function dayOf(ev: SpotEvaluation, date: string): DaySummary | undefined {
@@ -516,6 +613,7 @@ const INFO: Record<InfoKey, { title: string; text: string[] }> = {
       'Deutlich mehr Böen als Grundwind immer hinterfragen. Mögliche Ursachen: Windscherung, thermische Turbulenz, Lee, Düsen und Geländeeffekte, Schauer- oder Gewitterböen.',
       'Wind aus der passenden Richtung kann den Start leichter machen als Windstille. Ab etwa 10 km/h ist Rückwärtsaufziehen die sicherere Startmethode.',
       'Soaring: am schönsten bei geringer Böigkeit und wenig oder keiner Thermik. 15–20 km/h laminar passt auch für Chill, stärker eher Flow, sehr kräftig oder thermisch eher Push. Ob der Hang Soaring hergibt, prüfst du vor Ort.',
+      'Sonne auf dem Hang: Scheint die Sonne an einem Strahlungstag kräftig auf den Hang (morgens Osthänge, mittags Südhänge, nachmittags Westhänge), wird es lokal thermisch und das Soaring eine Stufe lebhafter. Liegt der Hang im Schatten, bleibt es eher laminar.',
     ],
   },
   thermik: {
@@ -523,7 +621,7 @@ const INFO: Record<InfoKey, { title: string; text: string[] }> = {
     text: [
       'Thermikstärke: geschätzter mittlerer Aufwind in der nutzbaren Schicht. Die App rechnet aus Sonneneinstrahlung und Bodentemperatur, wie viel Wärme in die Luft geht, und hebt ein Luftpaket durch das vorhergesagte Temperatur- und Taupunktprofil.',
       'Daraus kommen die konvektive Geschwindigkeit w* und ein geschätztes Steigen abzüglich des Eigensinkens eines Schirms (etwa 1,1 m/s).',
-      'Der Wert gilt für den Gitterpunkt des Modells am Startplatz und für die jeweilige Stunde, nicht für einen einzelnen Hang. Sonnen- und Schattenseiten sind noch nicht eingerechnet.',
+      'Der Wert gilt für den Gitterpunkt des Modells am Startplatz und für die jeweilige Stunde, nicht für einen einzelnen Hang. Ob die Sonne auf den Hang des Startplatzes scheint, rechnet die App bisher nur beim Soaring ein.',
       'Der Wert basiert auf Modellprognosen (ICON, Deutscher Wetterdienst) und kann durch lokale Effekte abweichen. Für die ersten zwei Tage ist das Modell feiner und meist zuverlässiger.',
     ],
   },
@@ -547,6 +645,7 @@ const INFO: Record<InfoKey, { title: string; text: string[] }> = {
     text: [
       'Das bewertet die App für dich, du musst Scherung nicht selbst einschätzen. Man könnte es auch Luftkomfort nennen: wie ruhig oder ruppig sich die Luft anfühlt.',
       'Es zählt der stärkste von mehreren Treibern: Windscherung, Böen über dem Grundwind, Wind, der die Thermik zerreißt, kräftige Thermik selbst und Lee, wenn der Höhenwind nicht aus Startrichtung kommt. Kommen mehrere zusammen, gibt es einen Aufschlag.',
+      TURBULENCE_EMOJI_TEXT,
     ],
   },
   scherung: {
@@ -684,7 +783,7 @@ function dayChips(onPick: (d: string) => void, single?: SpotEvaluation): HTMLEle
     'div',
     { class: 'days', role: 'group', 'aria-label': 'Tag wählen' },
     days.map((date) => {
-      const evs = single ? [single] : regionEvals();
+      const evs = single ? [single] : listEvals();
       const withWin = evs.filter((e) => (dayOf(e, date)?.windows.length ?? 0) > 0);
       const wins = withWin.flatMap((e) => dayOf(e, date)!.windows);
       const best = [...wins].sort((a, b) => b.fitMax - a.fitMax)[0];
@@ -703,6 +802,132 @@ function dayChips(onPick: (d: string) => void, single?: SpotEvaluation): HTMLEle
         h('span', { class: 'dots' }, best ? h('i', { class: `p-${best.personalZone}` }) : h('i')),
       );
     }),
+  );
+}
+
+const LISTS: { id: ListView; label: string }[] = [
+  { id: 'umgebung', label: 'Meine Umgebung' },
+  { id: 'favoriten', label: 'Favoriten' },
+  { id: 'alle', label: 'Alle' },
+];
+
+function listTabs(): HTMLElement {
+  return h(
+    'div',
+    { class: 'seg seg-list', role: 'group', 'aria-label': 'Startplätze' },
+    LISTS.map((l) =>
+      h(
+        'button',
+        {
+          type: 'button',
+          'aria-pressed': String(state.list === l.id),
+          onclick: () => {
+            state.list = l.id;
+            writeStore(LIST_KEY, l.id);
+            render();
+          },
+        },
+        h('b', {}, l.label),
+        l.id === 'favoriten' ? h('span', {}, state.favorites.size === 0 ? 'noch keine' : `${state.favorites.size} markiert`) : null,
+      ),
+    ),
+  );
+}
+
+function savePosition(p: Position | null): void {
+  state.position = p;
+  if (p) writeStore(POS_KEY, JSON.stringify(p));
+  else writeStore(POS_KEY, '');
+}
+
+function locate(): void {
+  if (!('geolocation' in navigator)) {
+    state.geoProblem = 'Dieses Gerät gibt keinen Standort heraus.';
+    render();
+    return;
+  }
+  state.geoProblem = 'Suche deinen Standort …';
+  render();
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      state.geoProblem = '';
+      savePosition({ lat: pos.coords.latitude, lon: pos.coords.longitude, source: 'gps', label: 'deinem Standort' });
+      render();
+    },
+    (err) => {
+      state.geoProblem =
+        err.code === err.PERMISSION_DENIED
+          ? 'Standort nicht freigegeben. Du kannst ihn in den Browser-Einstellungen erlauben oder unten einen Startplatz als Ausgangspunkt wählen.'
+          : 'Standort gerade nicht verfügbar. Wähle unten einen Startplatz als Ausgangspunkt.';
+      render();
+    },
+    { enableHighAccuracy: false, timeout: 10000, maximumAge: 30 * 60 * 1000 },
+  );
+}
+
+/** Standort und Umkreis für „Meine Umgebung“ */
+function nearbyControls(): HTMLElement {
+  const p = state.position;
+  const select = h(
+    'select',
+    {
+      'aria-label': 'Ausgangspunkt',
+      onchange: (e: Event) => {
+        const id = (e.target as HTMLSelectElement).value;
+        const spot = SPOTS.find((x) => x.id === id);
+        if (spot) {
+          state.geoProblem = '';
+          savePosition({ lat: spot.lat, lon: spot.lon, source: 'spot', label: spot.name });
+          render();
+        }
+      },
+    },
+    h('option', { value: '', selected: !p || p.source === 'gps' }, p?.source === 'gps' ? 'GPS-Standort' : 'Startplatz als Ausgangspunkt …'),
+    SPOTS.map((sp) => h('option', { value: sp.id, selected: p?.source === 'spot' && p.label === sp.name }, `${sp.name} (${sp.site.name})`)),
+  );
+  const radius = h(
+    'select',
+    {
+      'aria-label': 'Umkreis',
+      onchange: (e: Event) => {
+        state.radiusKm = Number((e.target as HTMLSelectElement).value);
+        writeStore(RADIUS_KEY, String(state.radiusKm));
+        render();
+      },
+    },
+    [25, 50, 75, 100, 150].map((km) => h('option', { value: km, selected: km === state.radiusKm }, `${km} km`)),
+  );
+  return h(
+    'div',
+    { class: 'nearby' },
+    h(
+      'div',
+      { class: 'nearby-row' },
+      h('button', { type: 'button', class: 'btn', onclick: locate }, p?.source === 'gps' ? 'Standort neu bestimmen' : 'Meinen Standort verwenden'),
+      h('label', { class: 'small' }, 'Umkreis ', radius),
+    ),
+    select,
+    state.geoProblem ? h('p', { class: 'small', role: 'status' }, state.geoProblem) : null,
+    p ? h('p', { class: 'small' }, `Sortiert nach Entfernung von ${p.label}. Der Standort bleibt nur auf diesem Gerät.`) : null,
+  );
+}
+
+function favoriteButton(spot: Spot, big = false): HTMLElement {
+  const on = isFavorite(spot.id);
+  return h(
+    'button',
+    {
+      type: 'button',
+      class: `fav${big ? ' big' : ''}`,
+      'aria-pressed': String(on),
+      'aria-label': on ? `${spot.name} aus den Favoriten nehmen` : `${spot.name} als Favorit markieren`,
+      title: on ? 'Favorit' : 'als Favorit markieren',
+      onclick: (e: Event) => {
+        e.stopPropagation();
+        toggleFavorite(spot.id);
+      },
+    },
+    on ? '★' : '☆',
   );
 }
 
@@ -731,36 +956,48 @@ function regionChips(): HTMLElement {
 
 function modeButtons(): HTMLElement {
   const mode = chosenMode();
+  const xc = xcOn(state.pilot);
   return h(
     'div',
-    { class: 'seg', role: 'group', 'aria-label': 'Tagesmodus' },
-    (['chill', 'progress', 'xc'] as Goal[]).map((g) =>
-      h(
-        'button',
-        { type: 'button', 'aria-pressed': String(mode === g), onclick: () => setMode(g) },
-        h('b', {}, GOAL_NAMES[g]),
-        h('span', {}, GOAL_HINT[g]),
+    { class: 'modes' },
+    h(
+      'div',
+      { class: 'seg', role: 'group', 'aria-label': 'Tagesmodus' },
+      GOALS.map((g) =>
+        h(
+          'button',
+          { type: 'button', 'aria-pressed': String(mode === g), onclick: () => setMode(g) },
+          h('b', {}, GOAL_NAMES[g]),
+          h('span', {}, GOAL_HINT[g]),
+        ),
       ),
+    ),
+    h(
+      'button',
+      { type: 'button', class: 'xc-toggle', 'aria-pressed': String(xc), onclick: () => setXc(!xc) },
+      h('b', {}, xc ? '✓ Strecke (XC)' : '+ Strecke (XC)'),
+      h('span', {}, xc ? `an: nur Stunden mit Thermik und Arbeitshöhe, Fenster ab ${XC_MIN_WINDOW_H} Stunden` : 'aus: tippen, wenn du heute Strecke fliegen willst'),
     ),
   );
 }
 
 function coachLine(): HTMLElement | null {
+  if (chosenMode() !== 'push' || pushReachesChallenge(state.pilot)) return null;
   const r = characterResult();
-  if (chosenMode() === 'xc' && r && !r.xcAdvised) {
-    return h('p', { class: 'coach' }, `Der Coach rechnet heute mit Flow statt Push. ${r.xcReason} Das ist keine Wertung, sondern deine Sicherheitsreserve.`);
-  }
-  return null;
+  const why = r ? `${r.pushReason} ` : 'Ohne Character bleibt Push vorsichtig. ';
+  return h('p', { class: 'coach' }, `Push reicht bei dir vorerst bis in die Progress-Zone. ${why}Das ist keine Wertung, sondern deine Sicherheitsreserve.`);
+}
+
+function modeLine(): HTMLElement {
+  return coachLine() ?? h('p', { class: 'small' }, `Als Flugfenster zählen ${modeZoneText(effectiveMode())}${xcOn(state.pilot) ? ', die für Strecke reichen' : ''}.`);
 }
 
 function modeBar(): HTMLElement {
-  return h(
-    'section',
-    { class: 'modebar', 'aria-label': 'Tagesmodus' },
-    h('h3', {}, 'Dein Modus heute'),
-    modeButtons(),
-    coachLine() ?? h('p', { class: 'small' }, `Als Flugfenster zählen ${MODE_ZONE_TEXT[effectiveMode()]}.`),
-  );
+  return h('section', { class: 'modebar', 'aria-label': 'Tagesmodus' }, h('h3', {}, 'Dein Modus heute'), modeButtons(), modeLine());
+}
+
+function modeTitle(): string {
+  return `${GOAL_NAMES[effectiveMode()]}${xcOn(state.pilot) ? ' mit Strecke' : ''}`;
 }
 
 function characterPrompt(): HTMLElement | null {
@@ -782,29 +1019,35 @@ function spotCard(ev: SpotEvaluation, day: DaySummary): HTMLElement {
     : day.bestHour
       ? [h('span', { class: 'small' }, `Beste Stunde ${day.bestHour.time.slice(11, 13)} Uhr: ${PZONE_NAMES[day.bestHour.fit.personalZone]}, ${day.bestHour.fit.label}`)]
       : [];
+  const dist = spotDistance(s);
   return h(
-    'button',
-    { class: 'card', type: 'button', onclick: () => openSpot(s.id) },
+    'div',
+    { class: 'cardwrap' },
     h(
-      'span',
-      { class: 'row1' },
-      h('span', { class: 'name' }, s.name),
-      h('span', { class: 'fit', title: 'beste persönliche Passung (0 bis 100)' }, String(fit), h('small', {}, '/100')),
+      'button',
+      { class: 'card', type: 'button', onclick: () => openSpot(s.id) },
+      h(
+        'span',
+        { class: 'row1' },
+        h('span', { class: 'name' }, s.name),
+        h('span', { class: 'fit', title: 'beste persönliche Passung (0 bis 100)' }, String(fit), h('small', {}, '/100')),
+      ),
+      h('span', { class: 'meta' }, `${s.site.name} · ${s.elevation} m · Start nach ${compass(s.facing)}${dist !== null ? ` · ${Math.round(dist)} km` : ''}`),
+      h('span', { class: 'wins' }, wins),
+      hourStrip(ev, day.date),
     ),
-    h('span', { class: 'meta' }, `${s.site.name} · ${s.elevation} m · Start nach ${compass(s.facing)}`),
-    h('span', { class: 'wins' }, wins),
-    hourStrip(ev, day.date),
+    favoriteButton(s),
   );
 }
 
 function renderWindows(view: HTMLElement): void {
   const date = state.day;
-  const rows = regionEvals()
+  const rows = listEvals()
     .map((ev) => ({ ev, day: dayOf(ev, date) }))
     .filter((r): r is { ev: SpotEvaluation; day: DaySummary } => !!r.day);
-  const good = rows.filter((r) => r.day.windows.length > 0).sort((a, b) => bestFit(b.day) - bestFit(a.day) || windowHours(b.day) - windowHours(a.day));
-  const meh = rows.filter((r) => r.day.windows.length === 0 && r.day.bestHour).sort((a, b) => bestFit(b.day) - bestFit(a.day));
-  const bad = rows.filter((r) => r.day.windows.length === 0 && !r.day.bestHour);
+  const good = rows.filter((r) => r.day.windows.length > 0).sort(listOrder);
+  const meh = rows.filter((r) => r.day.windows.length === 0 && r.day.bestHour).sort(listOrder);
+  const bad = rows.filter((r) => r.day.windows.length === 0 && !r.day.bestHour).sort(listOrder);
 
   const spot0 = rows[0]?.ev.spot ?? SPOTS[0];
   const sun = date ? sunTimes(spot0.lat, spot0.lon, date) : null;
@@ -816,7 +1059,8 @@ function renderWindows(view: HTMLElement): void {
       state.day = d;
       render();
     }),
-    regionChips(),
+    listTabs(),
+    ...[state.list === 'alle' ? regionChips() : null, state.list === 'umgebung' ? nearbyControls() : null].filter((x): x is HTMLElement => x !== null),
     h(
       'div',
       { class: 'dayhead' },
@@ -824,16 +1068,24 @@ function renderWindows(view: HTMLElement): void {
       h(
         'p',
         {},
-        `${good.length} von ${rows.length} Startplätzen mit Flugfenster im Modus ${GOAL_NAMES[effectiveMode()]}` +
+        `${good.length} von ${rows.length} Startplätzen mit Flugfenster im Modus ${modeTitle()}` +
           (sun ? ` · Sonne ${clockTime(sun.sunrise)} bis ${clockTime(sun.sunset)} Uhr` : ''),
       ),
     ),
   );
 
+  const listHint = emptyListHint(rows.length);
+  if (listHint) {
+    view.append(listHint);
+    return;
+  }
+  if (state.list !== 'favoriten' && state.favorites.size === 0 && (state.pilot.character?.prefs?.house_hill ?? 0) >= 4) {
+    view.append(h('p', { class: 'coach' }, 'Du fliegst meist an deinem Hausberg: Markiere ihn mit ☆, dann findest du ihn unter Favoriten sofort.'));
+  }
   if (good.length > 0) {
     view.append(h('section', { class: 'group' }, h('h3', {}, 'Passt zu dir'), good.map((r) => spotCard(r.ev, r.day))));
   } else {
-    view.append(h('p', { class: 'empty' }, `An diesem Tag passt kein Startplatz zu deinem Modus ${GOAL_NAMES[effectiveMode()]}. Weiter unten steht, was fliegbar wäre und was dagegen spricht.`));
+    view.append(h('p', { class: 'empty' }, `An diesem Tag passt kein Startplatz zu deinem Modus ${modeTitle()}. Weiter unten steht, was fliegbar wäre und was dagegen spricht.`));
   }
   if (meh.length > 0) {
     view.append(h('section', { class: 'group' }, h('h3', {}, 'Fliegbar, aber nicht in deinem Modus'), meh.map((r) => spotCard(r.ev, r.day))));
@@ -851,7 +1103,7 @@ function renderWindows(view: HTMLElement): void {
             h(
               'button',
               { type: 'button', onclick: () => openSpot(r.ev.spot.id) },
-              h('span', { class: 'n' }, r.ev.spot.name),
+              h('span', { class: 'n' }, `${isFavorite(r.ev.spot.id) ? '★ ' : ''}${r.ev.spot.name}`, state.list === 'umgebung' && spotDistance(r.ev.spot) !== null ? h('small', {}, ` · ${Math.round(spotDistance(r.ev.spot)!)} km`) : null),
               h('span', { class: 'r' }, r.day.noGoReasons.slice(0, 2).map((x) => x.reason).join(', ') || 'nicht fliegbar'),
             ),
           ),
@@ -859,6 +1111,24 @@ function renderWindows(view: HTMLElement): void {
       ),
     );
   }
+}
+
+/** Leere Liste erklären: kein Standort, keine Favoriten, nichts im Umkreis */
+function emptyListHint(count: number): HTMLElement | null {
+  if (count > 0) return null;
+  if (state.list === 'favoriten') {
+    return h('p', { class: 'empty' }, 'Noch keine Favoriten. Tippe bei einem Startplatz auf ☆, dann erscheint er hier. Unter „Alle“ stehen deine Favoriten außerdem oben.');
+  }
+  if (state.list === 'umgebung') {
+    return h(
+      'p',
+      { class: 'empty' },
+      state.position
+        ? `Im Umkreis von ${state.radiusKm} km um ${state.position.label} liegt kein Startplatz. Vergrößere den Umkreis oder wähle einen anderen Ausgangspunkt.`
+        : 'Verwende deinen Standort oder wähle einen Startplatz als Ausgangspunkt, dann zeigt die App die Startplätze in deiner Nähe, die nächsten zuerst.',
+    );
+  }
+  return h('p', { class: 'empty' }, 'Keine Startplätze in dieser Auswahl.');
 }
 
 function openSpot(id: string): void {
@@ -894,7 +1164,7 @@ function dimValue(k: DimensionKey, x: HourEvaluation): string {
   const m = x.metrics;
   if (k === 'wind_comfort') return `${Math.round(m.takeoffWindKmh)}/${Math.round(m.gustKmh)}`;
   if (k === 'thermic_character') return m.wStar > 0.3 && m.climbEstimate >= 0.2 ? `${num1(m.climbEstimate)} m/s` : x.dimensions[k].label === 'keine Thermik' ? 'keine' : 'schwach';
-  if (k === 'shear_turbulence') return x.dimensions[k].label;
+  if (k === 'shear_turbulence') return `${turbulenceEmoji(x.dimensions[k].score, envelopeOf(scoringPilot()).shear_turbulence)} ${x.dimensions[k].label}`;
   return m.workingHeight > 0 ? plus100(m.workingHeight) : '–';
 }
 
@@ -1009,6 +1279,69 @@ function fact(label: string, value: string): HTMLElement {
   return h('div', {}, h('dt', {}, label), h('dd', {}, value));
 }
 
+/** Was deine Debriefings an diesem Startplatz zeigen */
+function spotPatternNote(s: Spot): HTMLElement | null {
+  const found = spotPattern(state.debriefs, s.id);
+  if (found.length === 0) return null;
+  return h('p', { class: 'coach' }, `Aus deinen Debriefings hier: ${found.join(', ')}. Behalte das beim Lesen der Vorhersage im Hinterkopf.`);
+}
+
+function setSpotLaunch(spotId: string, change: (own: SpotLaunchPrefs) => void): void {
+  const all = (state.pilot.spot_launch ??= {});
+  const own = all[spotId] ?? {};
+  change(own);
+  if (own.crosswind === undefined && own.maxGustKmh === undefined) delete all[spotId];
+  else all[spotId] = own;
+  if (Object.keys(all).length === 0) delete state.pilot.spot_launch;
+  saveProfile();
+  rescore();
+  render();
+}
+
+const GUST_CHOICES = [10, 15, 20, 25, 30, 35];
+
+/** Eigene Startbedingungen für diesen Startplatz: Seitenwind (nur mit passendem Character) und Böen-Grenze */
+function spotLaunchBox(s: Spot): HTMLElement {
+  const own = state.pilot.spot_launch?.[s.id] ?? {};
+  const allowed = crosswindAllowed(state.pilot);
+  const effective = launchPrefsOf(state.pilot, s.id);
+  const cwOptions: { id: CrosswindTolerance | 'default'; title: string; text?: string }[] = [
+    { id: 'default', title: 'Wie allgemein', text: 'Deine Einstellung aus dem Profil.' },
+    ...CROSSWIND_OPTIONS,
+  ];
+  const gust = h(
+    'select',
+    {
+      id: `gust-${s.id}`,
+      onchange: (e: Event) => {
+        const v = (e.target as HTMLSelectElement).value;
+        setSpotLaunch(s.id, (o) => {
+          if (v === '') delete o.maxGustKmh;
+          else o.maxGustKmh = Number(v);
+        });
+      },
+    },
+    h('option', { value: '', selected: own.maxGustKmh === undefined }, 'keine eigene Grenze'),
+    GUST_CHOICES.map((km) => h('option', { value: km, selected: own.maxGustKmh === km }, `Böen höchstens ${km} km/h`)),
+  );
+  const set = own.crosswind !== undefined || own.maxGustKmh !== undefined;
+  return h(
+    'details',
+    { class: 'box more', open: set ? true : undefined },
+    h('summary', {}, set ? 'Deine Startbedingungen hier (eigene)' : 'Deine Startbedingungen hier'),
+    h(
+      'div',
+      { class: 'more-body' },
+      h('p', { class: 'small' }, 'Manche Startplätze kennst du besser als andere. Hier kannst du für diesen Startplatz eigene Grenzen setzen. Stunden darüber zählen hier nie als Flugfenster.'),
+      allowed
+        ? h('div', { class: 'q' }, h('h4', {}, 'Seitenwind an diesem Startplatz'), choiceList('Seitenwind hier', cwOptions, own.crosswind ?? 'default', (id) => setSpotLaunch(s.id, (o) => (id === 'default' ? delete o.crosswind : (o.crosswind = id)))))
+        : h('p', { class: 'small' }, 'Seitenwind kannst du hier einstellen, sobald dein Character als erfahren gilt (Technik ab „solide“, mindestens 20 Flüge im Jahr, mit dem System vertraut).'),
+      h('div', { class: 'q' }, h('h4', {}, h('label', { for: `gust-${s.id}` }, 'Böen-Grenze an diesem Startplatz')), gust),
+      h('p', { class: 'small' }, `Hier gilt: ${launchText(effective)}${effective.maxGustKmh !== undefined ? ` Böen höchstens ${effective.maxGustKmh} km/h.` : ''}`),
+    ),
+  );
+}
+
 function renderDetail(view: HTMLElement): void {
   const ev = state.evals.find((e) => e.spot.id === state.spotId);
   if (!ev) {
@@ -1038,10 +1371,11 @@ function renderDetail(view: HTMLElement): void {
     h(
       'div',
       { class: 'spothead' },
-      h('h2', {}, s.name),
+      h('div', { class: 'spottitle' }, h('h2', {}, s.name), favoriteButton(s, true)),
       h('p', {}, `${s.site.name} · ${s.site.region} · ${s.site.club}`),
     ),
     h('dl', { class: 'facts' }, facts),
+    ...[spotPatternNote(s)].filter((x): x is HTMLElement => x !== null),
     dayChips((d) => {
       state.day = d;
       render();
@@ -1065,6 +1399,7 @@ function renderDetail(view: HTMLElement): void {
 
   const notes = [...s.notes];
   if (s.airspace) notes.push(`${s.airspace.note}.`);
+  view.append(spotLaunchBox(s));
   view.append(
     h(
       'section',
@@ -1241,6 +1576,45 @@ function zoneEditor(k: DimensionKey, summary: HTMLElement): HTMLElement {
   return h('div', { class: 'dimset' }, titledInfo('h4', DIM_NAMES[k], infoKey[k]), h('span', { class: 'hint' }, DIM_HINT[k]), h('div', { class: 'zwrap' }, scale, zoneTicks()), rows);
 }
 
+/** Regler für Mindestanforderungen (eines Modus oder der Strecken-Option) */
+function reqEditor(prefix: string, req: GoalRequirements, summary: HTMLElement): HTMLElement[] {
+  return (Object.keys(REQ_LABELS) as ReqKey[]).flatMap((key) => {
+    const active = req[key] !== undefined;
+    const value = req[key] ?? REQ_DEFAULT[key];
+    let sliderEl: HTMLElement;
+    const check = h('input', {
+      type: 'checkbox',
+      id: `req-on-${prefix}-${key}`,
+      checked: active,
+      'aria-label': `${REQ_LABELS[key]} prüfen`,
+      onchange: (e: Event) => {
+        const on = (e.target as HTMLInputElement).checked;
+        if (on) req[key] = Number((sliderEl.querySelector('input') as HTMLInputElement).value);
+        else delete req[key];
+        (sliderEl.querySelector('input') as HTMLInputElement).disabled = !on;
+        profileChanged(summary);
+      },
+    });
+    sliderEl = slider({
+      id: `req-${prefix}-${key}`,
+      label: REQ_LABELS[key],
+      min: 0,
+      max: 5,
+      step: 0.5,
+      value,
+      format: num1,
+      disabled: !active,
+      onChange: (v) => {
+        if (req[key] !== undefined) {
+          req[key] = v;
+          profileChanged(summary);
+        }
+      },
+    });
+    return [check, sliderEl];
+  });
+}
+
 function characterBox(): HTMLElement {
   const c = state.pilot.character;
   const r = characterResult();
@@ -1301,7 +1675,65 @@ function launchBox(summary: HTMLElement): HTMLElement {
     ),
     rows,
     current,
+    spotLaunchList(),
   );
+}
+
+/** Startplätze mit eigenen Startbedingungen, mit Link dorthin */
+function spotLaunchList(): HTMLElement | null {
+  const own = Object.entries(state.pilot.spot_launch ?? {});
+  if (own.length === 0) return h('p', { class: 'small' }, 'Für einzelne Startplätze kannst du eigene Grenzen setzen: in der Startplatz-Ansicht unter „Deine Startbedingungen hier“.');
+  return h(
+    'div',
+    {},
+    h('h4', {}, 'Eigene Startbedingungen an einzelnen Startplätzen'),
+    h(
+      'ul',
+      { class: 'plain' },
+      own.map(([id, o]) => {
+        const spot = SPOTS.find((x) => x.id === id);
+        const parts = [o.crosswind ? `Seitenwind ${CROSSWIND_OPTIONS.find((c) => c.id === o.crosswind)?.title.toLowerCase()}` : '', o.maxGustKmh !== undefined ? `Böen höchstens ${o.maxGustKmh} km/h` : ''].filter(Boolean);
+        return h('li', {}, h('a', { href: `#${id}` }, spot?.name ?? id), `: ${parts.join(', ')}`);
+      }),
+    ),
+  );
+}
+
+/** Optionale Vorlieben: verschieben nie Grenzen, nur wie gut dir eine Stunde gefällt */
+function prefsBox(summary: HTMLElement): HTMLElement {
+  const c = state.pilot.character;
+  if (!c) {
+    return h('section', { class: 'box' }, h('h3', {}, 'Deine Vorlieben (optional)'), h('p', { class: 'small' }, 'Sobald dein Character angelegt ist, kannst du hier sagen, was dir am Fliegen gefällt, zum Beispiel ob du Blauthermik magst.'));
+  }
+  const prefs = (c.prefs ??= {});
+  return h(
+    'details',
+    { class: 'box more', open: Object.keys(prefs).length > 0 ? true : undefined },
+    h('summary', {}, 'Deine Vorlieben (optional)'),
+    h('div', { class: 'more-body' }, prefsQuestions(prefs, () => profileChanged(summary))),
+  );
+}
+
+function prefsQuestions(prefs: Partial<Record<PrefKey, number>>, onChange: () => void): HTMLElement[] {
+  return [
+    h('p', { class: 'small' }, 'Alles freiwillig. Vorlieben verschieben nie deine Grenzen, sie verändern nur, wie gut dir eine Stunde gefällt. Nicht beantwortet heißt: neutral.'),
+    ...PREF_QUESTIONS.map((q) =>
+      h('div', { class: 'pref' }, ratingRow(q, prefs as Record<string, number>, ['trifft gar nicht zu', 'trifft voll zu'], onChange), h('span', { class: 'hint' }, q.effect)),
+    ),
+    h(
+      'button',
+      {
+        type: 'button',
+        class: 'btn',
+        onclick: () => {
+          for (const k of Object.keys(prefs)) delete prefs[k as PrefKey];
+          onChange();
+          render();
+        },
+      },
+      'Vorlieben zurücksetzen',
+    ),
+  ];
 }
 
 function renderProfile(view: HTMLElement): void {
@@ -1324,43 +1756,6 @@ function renderProfile(view: HTMLElement): void {
         profileChanged(summary);
       },
     });
-  });
-
-  const req = (cp.min_required_scores_for_goal[mode] ??= {});
-  const reqRows = (Object.keys(REQ_LABELS) as ReqKey[]).map((key) => {
-    const active = req[key] !== undefined;
-    const value = req[key] ?? REQ_DEFAULT[key];
-    let sliderEl: HTMLElement;
-    const check = h('input', {
-      type: 'checkbox',
-      id: `req-on-${key}`,
-      checked: active,
-      'aria-label': `${REQ_LABELS[key]} prüfen`,
-      onchange: (e: Event) => {
-        const on = (e.target as HTMLInputElement).checked;
-        if (on) req[key] = Number((sliderEl.querySelector('input') as HTMLInputElement).value);
-        else delete req[key];
-        (sliderEl.querySelector('input') as HTMLInputElement).disabled = !on;
-        profileChanged(summary);
-      },
-    });
-    sliderEl = slider({
-      id: `req-${key}`,
-      label: REQ_LABELS[key],
-      min: 0,
-      max: 5,
-      step: 0.5,
-      value,
-      format: num1,
-      disabled: !active,
-      onChange: (v) => {
-        if (req[key] !== undefined) {
-          req[key] = v;
-          profileChanged(summary);
-        }
-      },
-    });
-    return [check, sliderEl];
   });
 
   // Zurücksetzen löscht auch den Character, deshalb zweimal tippen statt eines Dialogs.
@@ -1389,8 +1784,9 @@ function renderProfile(view: HTMLElement): void {
 
   view.append(
     characterBox(),
-    h('section', { class: 'box' }, h('h3', {}, 'Dein Modus heute'), modeButtons(), coachLine() ?? h('p', { class: 'small' }, `Als Flugfenster zählen ${MODE_ZONE_TEXT[mode]}.`), summary),
+    h('section', { class: 'box' }, h('h3', {}, 'Dein Modus heute'), modeButtons(), modeLine(), summary),
     launchBox(summary),
+    prefsBox(summary),
     h(
       'section',
       { class: 'box' },
@@ -1403,7 +1799,7 @@ function renderProfile(view: HTMLElement): void {
         h(
           'p',
           { class: 'small' },
-          'Für jede Dimension drei Grenzen: bis wohin du entspannt fliegst (Komfort), wo du bewusst wächst (Progress) und was du dir an Push-Tagen zumutest (Challenge). Darüber beginnt die Überforderung, die nie als Flugfenster zählt. In der Stundenansicht markiert ein Strich auf dem Balken die Grenze deines Modus.',
+          'Für jede Dimension drei Grenzen: bis wohin du entspannt und im Flow fliegst (Komfort), wo du bewusst wächst (Progress) und was du dir an Push-Tagen höchstens zumutest (Challenge). Darüber beginnt die Überforderung, die nie als Flugfenster zählt. In der Stundenansicht markiert ein Strich auf dem Balken die Grenze deines Modus.',
         ),
         zoneLegend(),
         DIM_KEYS.map((k) => zoneEditor(k, summary)),
@@ -1439,11 +1835,259 @@ function renderProfile(view: HTMLElement): void {
         ),
         weights,
         h('h4', {}, `Was ${GOAL_NAMES[mode]} mindestens braucht`),
-        h('p', { class: 'small' }, 'Reicht eine Stunde dafür nicht, kostet das 25 Punkte Passung. Haken weg heißt: wird nicht geprüft. Skala 0 bis 5 wie bei den Zonen.'),
-        h('div', { class: 'req' }, reqRows.flat()),
+        h('p', { class: 'small' }, 'Reicht eine Stunde dafür nicht, kostet das 25 Punkte Passung. Haken weg heißt: wird nicht geprüft. Skala 0 bis 5 wie bei den Zonen. Soaring-Stunden brauchen keine Thermik.'),
+        h('div', { class: 'req' }, reqEditor('mode', (cp.min_required_scores_for_goal[mode] ??= {}), summary)),
+        h('h4', {}, 'Was Strecke (XC) mindestens braucht'),
+        h('p', { class: 'small' }, `Mit Strecken-Option zählt eine Stunde nur, wenn sie das erfüllt, und ein Flugfenster erst ab ${XC_MIN_WINDOW_H} Stunden. Soaring zählt hier nicht.`),
+        h('div', { class: 'req' }, reqEditor('xc', (cp.min_required_scores_for_goal.xc ??= { thermic_character_min: 2.5, structure_cap_min: 2.5 }), summary)),
       ),
     ),
-    h('section', { class: 'box' }, h('p', { class: 'small' }, 'Character, Startbedingungen, Zonen und Modus werden nur auf diesem Gerät gespeichert.'), reset),
+    debriefBox(),
+    h('section', { class: 'box' }, h('p', { class: 'small' }, 'Character, Startbedingungen, Zonen, Modus, Favoriten und Debriefings werden nur auf diesem Gerät gespeichert.'), reset),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Debriefing nach dem Flug (erste Fassung des Flugtagebuchs)
+// ---------------------------------------------------------------------------
+
+const COMPARE_OPTIONS: { id: Compare; title: string }[] = [
+  { id: 'less', title: 'schwächer' },
+  { id: 'as', title: 'wie vorhergesagt' },
+  { id: 'more', title: 'stärker' },
+];
+
+interface DebriefDraft {
+  spotId: string;
+  date: string;
+  hour: number;
+  answers: DebriefAnswers;
+  note: string;
+}
+
+let debriefDraft: DebriefDraft | null = null;
+let debriefFlash = '';
+
+function newDebriefDraft(): DebriefDraft {
+  const now = berlin(new Date());
+  const fav = SPOTS.find((x) => isFavorite(x.id));
+  return { spotId: state.spotId || fav?.id || SPOTS[0].id, date: now.date, hour: Math.max(8, Math.min(19, now.hour - 2)), answers: {}, note: '' };
+}
+
+function saveDebriefs(): void {
+  writeStore(DEBRIEF_KEY, JSON.stringify(state.debriefs));
+}
+
+/** Kleine Auswahl als Chips; aktualisiert sich selbst, ohne die Seite neu aufzubauen */
+function chipGroup<T extends string | number>(label: string, options: { id: T; title: string }[], value: T | undefined, onPick: (id: T) => void): HTMLElement {
+  const buttons: HTMLElement[] = options.map((o) =>
+    h(
+      'button',
+      {
+        type: 'button',
+        class: 'chip',
+        'aria-pressed': String(o.id === value),
+        onclick: (e: Event) => {
+          for (const b of buttons) b.setAttribute('aria-pressed', String(b === e.currentTarget));
+          onPick(o.id);
+        },
+      },
+      o.title,
+    ),
+  );
+  return h('div', { class: 'dq' }, h('span', { class: 'dq-l' }, label), h('div', { class: 'filters', role: 'group', 'aria-label': label }, buttons));
+}
+
+function forecastHour(spotId: string, date: string, hour: number): HourEvaluation | undefined {
+  const time = `${date}T${String(hour).padStart(2, '0')}:00`;
+  return state.evals.find((e) => e.spot.id === spotId)?.hours.find((x) => x.time === time);
+}
+
+function debriefForm(): HTMLElement {
+  const d = (debriefDraft ??= newDebriefDraft());
+  const a = d.answers;
+  const match = h('p', { class: 'small', role: 'status' });
+  const showMatch = () => {
+    const fh = forecastHour(d.spotId, d.date, d.hour);
+    match.textContent = fh
+      ? `Vorhersage für diese Stunde: ${PZONE_NAMES[fh.fit.personalZone]}, ${fh.zoneLabel}, Grundwind ${kmh(fh.metrics.takeoffWindKmh)}, Böen ${kmh(fh.metrics.gustKmh)}. Die App legt sie neben deine Antworten.`
+      : 'Für diese Stunde ist keine Vorhersage mehr gespeichert. Der Eintrag wird ohne Abgleich gespeichert.';
+  };
+  const favFirst = [...SPOTS].sort((x, y) => Number(isFavorite(y.id)) - Number(isFavorite(x.id)));
+  const spotSel = h(
+    'select',
+    { id: 'db-spot', onchange: (e: Event) => ((d.spotId = (e.target as HTMLSelectElement).value), showMatch()) },
+    favFirst.map((sp) => h('option', { value: sp.id, selected: sp.id === d.spotId }, `${isFavorite(sp.id) ? '★ ' : ''}${sp.name}`)),
+  );
+  const dateIn = h('input', { id: 'db-date', type: 'date', value: d.date, onchange: (e: Event) => ((d.date = (e.target as HTMLInputElement).value), showMatch()) });
+  const hourSel = h(
+    'select',
+    { id: 'db-hour', onchange: (e: Event) => ((d.hour = Number((e.target as HTMLSelectElement).value)), showMatch()) },
+    Array.from({ length: 15 }, (_, i) => i + 6).map((hh) => h('option', { value: hh, selected: hh === d.hour }, `${String(hh).padStart(2, '0')} Uhr`)),
+  );
+  showMatch();
+  const save = h(
+    'button',
+    {
+      type: 'button',
+      class: 'btn primary',
+      onclick: () => {
+        if (a.feeling === undefined) {
+          debriefFlash = 'Bitte wähle noch, wie du dich im Flug gefühlt hast.';
+          render();
+          return;
+        }
+        const fh = forecastHour(d.spotId, d.date, d.hour);
+        const forecast = fh ? snapshotOf(fh, envelopeOf(state.pilot)) : undefined;
+        const entry: DebriefEntry = {
+          id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+          createdAt: new Date().toISOString(),
+          spotId: d.spotId,
+          date: d.date,
+          hour: d.hour,
+          answers: { ...a },
+          note: d.note.trim() || undefined,
+          forecast,
+          suggestions: [],
+        };
+        entry.suggestions = suggestFromEntry(entry);
+        state.debriefs.unshift(entry);
+        saveDebriefs();
+        debriefDraft = null;
+        debriefFlash = entry.suggestions.length > 0 ? 'Gespeichert. Die App hat einen Vorschlag für deine Zonen, siehe unten.' : forecast ? 'Gespeichert. Deine Antworten passen zur Vorhersage, kein Vorschlag nötig.' : 'Gespeichert (ohne Abgleich mit der Vorhersage).';
+        render();
+      },
+    },
+    'Debriefing speichern',
+  );
+  return h(
+    'div',
+    { class: 'debrief-form' },
+    h('div', { class: 'dgrid' }, h('label', { for: 'db-spot' }, 'Startplatz', spotSel), h('label', { for: 'db-date' }, 'Tag', dateIn), h('label', { for: 'db-hour' }, 'Start um', hourSel)),
+    match,
+    chipGroup('Start', [{ id: 'easy', title: 'leicht' }, { id: 'ok', title: 'okay' }, { id: 'hard', title: 'schwierig' }], a.launch, (id) => (a.launch = id)),
+    chipGroup('Wind', COMPARE_OPTIONS, a.wind, (id) => (a.wind = id)),
+    chipGroup('Turbulenz', COMPARE_OPTIONS, a.turbulence, (id) => (a.turbulence = id)),
+    chipGroup('Thermik', COMPARE_OPTIONS, a.thermal, (id) => (a.thermal = id)),
+    chipGroup('Basis oder Arbeitshöhe erreicht', [{ id: 'yes', title: 'ja' }, { id: 'no', title: 'nein' }], a.base, (id) => (a.base = id)),
+    chipGroup('Abschattung', [{ id: 'none', title: 'keine' }, { id: 'some', title: 'etwas' }, { id: 'much', title: 'stark' }], a.shading, (id) => (a.shading = id)),
+    chipGroup('Wieder so fliegen?', [{ id: 'yes', title: 'ja' }, { id: 'maybe', title: 'vielleicht' }, { id: 'no', title: 'nein' }], a.again, (id) => (a.again = id)),
+    h('div', { class: 'dq' }, h('span', { class: 'dq-l' }, 'Wie hast du dich gefühlt?'), feelingRow(a)),
+    h('label', { class: 'dnote' }, 'Notiz (optional)', h('textarea', { rows: 2, oninput: (e: Event) => (d.note = (e.target as HTMLTextAreaElement).value) }, d.note)),
+    save,
+  );
+}
+
+function feelingRow(a: DebriefAnswers): HTMLElement {
+  const words = ['gar nicht wohl', 'eher unwohl', 'neutral', 'wohl', 'rundum wohl'];
+  const buttons: HTMLElement[] = FEELINGS.map((emoji, i) =>
+    h(
+      'button',
+      {
+        type: 'button',
+        'aria-pressed': String(a.feeling === i),
+        'aria-label': words[i],
+        title: words[i],
+        onclick: (e: Event) => {
+          a.feeling = i;
+          for (const b of buttons) b.setAttribute('aria-pressed', String(b === e.currentTarget));
+        },
+      },
+      emoji,
+    ),
+  );
+  return h('div', { class: 'feel', role: 'group', 'aria-label': 'Gefühl im Flug' }, buttons);
+}
+
+function applyDebriefSuggestion(entry: DebriefEntry, index: number, take: boolean): void {
+  const sug = entry.suggestions[index];
+  if (!sug || sug.status !== 'open') return;
+  if (take) {
+    const env = editableEnvelope();
+    applySuggestion(env, sug);
+    const tol = state.pilot.comfort_profile.tolerance[sug.dim];
+    if (tol) tol.max_score_acceptable = env[sug.dim].progress;
+    saveProfile();
+    rescore();
+  }
+  sug.status = take ? 'applied' : 'dismissed';
+  saveDebriefs();
+  render();
+}
+
+function debriefEntryView(e: DebriefEntry): HTMLElement {
+  const spot = SPOTS.find((x) => x.id === e.spotId);
+  const f = e.forecast;
+  const a = e.answers;
+  const cmp = (x?: Compare) => (x ? COMPARE_OPTIONS.find((o) => o.id === x)?.title : undefined);
+  const said = [
+    a.launch ? `Start ${{ easy: 'leicht', ok: 'okay', hard: 'schwierig' }[a.launch]}` : '',
+    cmp(a.wind) ? `Wind ${cmp(a.wind)}` : '',
+    cmp(a.turbulence) ? `Turbulenz ${cmp(a.turbulence)}` : '',
+    cmp(a.thermal) ? `Thermik ${cmp(a.thermal)}` : '',
+    a.base ? (a.base === 'yes' ? 'Basis erreicht' : 'Basis nicht erreicht') : '',
+    a.shading && a.shading !== 'none' ? `Abschattung ${a.shading === 'some' ? 'etwas' : 'stark'}` : '',
+    a.again ? `wieder so: ${{ yes: 'ja', maybe: 'vielleicht', no: 'nein' }[a.again]}` : '',
+  ].filter(Boolean);
+  return h(
+    'li',
+    { class: 'dentry' },
+    h('div', { class: 'dhead' }, h('b', {}, `${spot?.name ?? e.spotId}, ${dateShort(e.date)} ${String(e.hour).padStart(2, '0')} Uhr`), h('span', { class: 'emo' }, a.feeling !== undefined ? FEELINGS[a.feeling] : '')),
+    said.length > 0 ? h('p', { class: 'small' }, said.join(' · ')) : null,
+    f ? h('p', { class: 'small' }, `Vorhersage: ${PZONE_NAMES[f.personalZone]}, ${f.zoneLabel}, ${f.windKmh}/${f.gustKmh} km/h, Passung ${f.fit}`) : h('p', { class: 'small' }, 'ohne Abgleich mit der Vorhersage'),
+    e.note ? h('p', { class: 'small' }, `„${e.note}“`) : null,
+    e.suggestions.map((sug, i) =>
+      h(
+        'div',
+        { class: `dsug ${sug.status}` },
+        h('p', {}, sug.text),
+        sug.status === 'open'
+          ? h(
+              'div',
+              { class: 'dsug-btns' },
+              h('button', { type: 'button', class: 'btn primary', onclick: () => applyDebriefSuggestion(e, i, true) }, sug.delta > 0 ? 'Mutiger stellen' : 'Vorsichtiger stellen'),
+              h('button', { type: 'button', class: 'btn', onclick: () => applyDebriefSuggestion(e, i, false) }, 'Nein, so lassen'),
+            )
+          : h('p', { class: 'small' }, sug.status === 'applied' ? 'übernommen' : 'verworfen'),
+      ),
+    ),
+    h(
+      'button',
+      {
+        type: 'button',
+        class: 'linkbtn',
+        onclick: () => {
+          state.debriefs = state.debriefs.filter((x) => x.id !== e.id);
+          saveDebriefs();
+          render();
+        },
+      },
+      'Eintrag löschen',
+    ),
+  );
+}
+
+function debriefBox(): HTMLElement {
+  const flash = debriefFlash;
+  debriefFlash = '';
+  const open = state.debriefs.length > 0 || debriefDraft !== null || flash !== '';
+  return h(
+    'details',
+    { class: 'box more', id: 'debriefing', open: open ? true : undefined },
+    h('summary', {}, `Debriefing nach dem Flug${state.debriefs.length > 0 ? ` (${state.debriefs.length})` : ''}`),
+    h(
+      'div',
+      { class: 'more-body' },
+      h(
+        'p',
+        { class: 'small' },
+        'Wie war es wirklich? Die App legt die Vorhersage für Startplatz und Stunde neben deine Antworten. Passt beides nicht zusammen, schlägt sie vor, deine Zonen eine Viertelstufe vorsichtiger oder mutiger zu stellen. Übernommen wird nur, was du bestätigst.',
+      ),
+      flash ? h('p', { class: 'coach ok', role: 'status' }, flash) : null,
+      debriefForm(),
+      state.debriefs.length > 0 ? h('h4', {}, 'Deine Einträge') : null,
+      state.debriefs.length > 0 ? h('ul', { class: 'dlist' }, state.debriefs.slice(0, 20).map(debriefEntryView)) : null,
+    ),
   );
 }
 
@@ -1461,6 +2105,7 @@ interface Draft {
   tailwind?: TailwindTolerance;
   skills: Record<string, number>;
   safety: Record<string, number>;
+  prefs: Partial<Record<PrefKey, number>>;
 }
 
 const WIZARD_STEPS = ['Flugstil', 'Schirm, Flugpraxis und Start', 'Technik', 'Sicherheitsgefühl', 'Ergebnis'];
@@ -1476,6 +2121,7 @@ function draftAnswers(d: Draft): CharacterAnswers {
     tailwind: d.tailwind,
     skills: d.skills,
     safety: d.safety,
+    ...(Object.keys(d.prefs).length > 0 ? { prefs: { ...d.prefs } } : {}),
   };
 }
 const wizard = { step: 0, draft: null as Draft | null };
@@ -1494,8 +2140,9 @@ function wizardDraft(): Draft {
           tailwind: c.tailwind,
           skills: { ...c.skills },
           safety: { ...c.safety },
+          prefs: { ...(c.prefs ?? {}) },
         }
-      : { skills: {}, safety: {} };
+      : { skills: {}, safety: {}, prefs: {} };
   }
   return wizard.draft;
 }
@@ -1642,11 +2289,21 @@ function characterResultView(d: Draft, update: () => void): HTMLElement[] {
     h(
       'p',
       { class: 'coach' },
-      r.xcAdvised
-        ? 'Push passt zu deinem Character: An Push-Tagen zählen Stunden bis in deine Challenge-Zone.'
-        : `Für Push rechnet der Coach vorerst mit Flow. ${r.xcReason} Das ist keine Wertung, sondern deine Sicherheitsreserve.`,
+      r.pushAdvised
+        ? 'An Push-Tagen zählen bei dir Stunden bis in deine Challenge-Zone.'
+        : `An Push-Tagen zählen bei dir vorerst Stunden bis in deine Progress-Zone. ${r.pushReason} Das ist keine Wertung, sondern deine Sicherheitsreserve.`,
     ),
-    h('p', {}, `Tagesmodus zum Start: ${GOAL_NAMES[r.defaultMode]}, passend zu deinem Flugstil. Du kannst ihn jeden Tag neu wählen. Der Flugstil verschiebt nie deine Grenzen, die kommen nur aus Technik, Sicherheitsgefühl, Schirm und Flugpraxis.`),
+    h(
+      'p',
+      {},
+      `Tagesmodus zum Start: ${GOAL_NAMES[r.defaultMode]}${r.defaultXc ? ' mit Strecke (XC)' : ''}, passend zu deinem Flugstil. Du kannst ihn jeden Tag neu wählen. Der Flugstil verschiebt nie deine Grenzen, die kommen nur aus Technik, Sicherheitsgefühl, Schirm und Flugpraxis.`,
+    ),
+    h(
+      'details',
+      { class: 'zones-more' },
+      h('summary', {}, 'Optional: deine Vorlieben'),
+      h('div', { class: 'wizard' }, prefsQuestions(d.prefs, update)),
+    ),
     h('h3', {}, 'Deine Flug-Zonen'),
     h('p', { class: 'coach' }, ZONES_HINT),
     zonesDetails(r.envelope),
@@ -1856,11 +2513,12 @@ function renderInfo(view: HTMLElement): void {
       h(
         'ul',
         {},
-        h('li', {}, `Chill: ${GOAL_LONG.chill} Als Flugfenster zählen nur Stunden in deiner Komfort-Zone.`),
-        h('li', {}, `Flow: ${GOAL_LONG.progress} Es zählen Stunden bis in deine Progress-Zone.`),
-        h('li', {}, `Push: ${GOAL_LONG.xc} Es zählen Stunden bis in deine Challenge-Zone. Blauthermik gilt dabei nicht automatisch als gut, die App weist darauf hin.`),
+        h('li', {}, `Chill: ${GOAL_LONG.chill} Es zählen Stunden mit ruhiger Luft in deiner Komfort-Zone.`),
+        h('li', {}, `Flow: ${GOAL_LONG.flow} Es zählen alle Stunden in deiner Komfort-Zone.`),
+        h('li', {}, `Push: ${GOAL_LONG.push} Es zählen Stunden bis in deine Challenge-Zone, solange dein Technik-Score unter 31 von 50 oder dein Sicherheits-Score unter 21 von 40 liegt (oder noch kein Character angelegt ist) bis in deine Progress-Zone.`),
+        h('li', {}, `Strecke (XC): eine eigene Option zu jedem Modus. Dann zählen nur Stunden mit genug Thermik und Arbeitshöhe, und ein Flugfenster erst ab ${XC_MIN_WINDOW_H} Stunden. Soaring zählt dafür nicht, Blauthermik bewertet die App nach deinen Vorlieben.`),
       ),
-      h('p', { class: 'small' }, 'Die Modi beschreiben die Flug- und Entscheidungslage, nicht dein Können. Solange dein Technik-Score unter 31 von 50 oder dein Sicherheits-Score unter 21 von 40 liegt, rechnet der Coach Push als Flow.'),
+      h('p', { class: 'small' }, 'Die Modi beschreiben die Flug- und Entscheidungslage, nicht dein Können. Streckenfliegen ist keine höhere Stufe, sondern eine eigene Art zu fliegen.'),
     ),
     h(
       'section',
@@ -1891,7 +2549,7 @@ function renderInfo(view: HTMLElement): void {
       h(
         'p',
         { class: 'small' },
-        'Passung: 100, wenn alle vier Dimensionen in der Zone deines Modus liegen, 75, wenn es für den Modus nicht ganz reicht (zum Beispiel zu wenig Thermik für Push). Liegt eine Dimension darüber oder passt der Start nicht zu deinen Startbedingungen, bleibt die Passung unter 50, bei Überforderung unter 20. Ab 60 zählt eine Stunde zum Flugfenster.',
+        'Passung: 100, wenn alle vier Dimensionen in der Zone deines Modus liegen, 75, wenn es für den Modus nicht ganz reicht (zum Beispiel zu wenig Thermik). Deine Vorlieben verschieben sie ein wenig. Liegt eine Dimension darüber, ist die Luft für Chill zu lebhaft oder passt der Start nicht zu deinen Startbedingungen, bleibt die Passung unter 50, bei Überforderung unter 20. Mit Strecken-Option bleibt sie unter 60, wenn es für Strecke nicht reicht. Ab 60 zählt eine Stunde zum Flugfenster.',
       ),
     ),
     h(
@@ -1901,9 +2559,9 @@ function renderInfo(view: HTMLElement): void {
       h(
         'ul',
         {},
-        h('li', {}, 'Die Starttabelle für deine Zonen und die Schwellen der Dimensionen sind Startwerte und noch nicht an echten Flügen geeicht. Das soll später das Flugtagebuch übernehmen.'),
+        h('li', {}, 'Die Starttabelle für deine Zonen und die Schwellen der Dimensionen sind Startwerte und noch nicht an echten Flügen geeicht. Mit dem Debriefing im Profil kannst du sie nach jedem Flug nachjustieren.'),
         h('li', {}, 'Das Modellgelände ist geglättet. Düsen, Talwind und lokale Effekte fehlen, am Merkur ist der Wind oft stärker als vorhergesagt.'),
-        h('li', {}, 'Bei Windstille gelten alle Startrichtungen eines Bergs als möglich. Welcher Hang Sonne hat, ist noch nicht eingerechnet.'),
+        h('li', {}, 'Bei Windstille gelten alle Startrichtungen eines Bergs als möglich. Ob die Sonne auf den Hang scheint, rechnet die App bisher nur beim Soaring ein.'),
         h('li', {}, 'Die App ersetzt nicht den Blick auf Stationen, Webcams und die Lage vor Ort. Bewusst nicht zu starten ist eine starke Entscheidung.'),
       ),
     ),
