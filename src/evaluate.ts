@@ -21,9 +21,13 @@ import {
   inSector,
   liftParcel,
   rhFromDewPoint,
+  sunPosition,
   sunTimes,
   windAt,
 } from './physics.ts';
+import { aboveStart, alt100, de1 } from './format.ts';
+import { gustLabel, gustLevel, gustTurbulenceScore } from './wind.ts';
+import type { Goal } from './types.ts';
 
 const KMH = 3.6;
 const r0 = (x: number) => Math.round(x);
@@ -120,9 +124,15 @@ export function computeMetrics(spot: Spot, hour: HourInput, cfg: EngineConfig): 
   const tTake = envTemperature(hour.thermo, Math.max(zT, s.z + 2));
   const tdTake = envDewPoint(hour.thermo, Math.max(zT, s.z + 2));
 
+  // Sonne auf dem Hang: Der Startplatz schaut in Richtung `facing` (dorthin, woher der ideale Wind kommt). Steht die
+  // Sonne in diesem Halbkreis (±60°) hoch genug und scheint sie kräftig, heizt sie den Hang lokal auf.
+  const sun = sunPosition(spot.lat, spot.lon, hour.time);
+  const sunOnSlope = hour.isDay && sun.elevation >= cfg.rules.slopeSunMinElevationDeg && s.swRad >= cfg.rules.slopeSunMinRadiation && angleDiff(sun.azimuth, spot.facing) < 60;
+
   return {
     takeoffWindKmh: r1(wTake.speed * KMH),
     takeoffWindDir: r0(wTake.dir),
+    takeoffInSector: inSector(wTake.dir, spot.windSector),
     headwindKmh: r1(headwind * KMH),
     crosswindKmh: r1(crosswind * KMH),
     windAboveKmh: r1(wAbove.speed * KMH),
@@ -133,6 +143,7 @@ export function computeMetrics(spot: Spot, hour: HourInput, cfg: EngineConfig): 
     // Böen gegen den Grundwind: im Wald ist der 10-m-Wind stark gebremst, deshalb zählt der stärkere von 10-m- und Startwind
     gustSpreadKmh: r1(Math.max(0, s.gust10 - baseWind) * KMH),
     gustFactor: baseWind * KMH >= 10 ? r1(s.gust10 / baseWind) : null,
+    gustLevel: gustLevel(wTake.speed * KMH, s.gust10 * KMH),
     shearPerKm: r1(maxShear),
     thermalTopMsl: r0(thermalTop),
     cloudBaseMsl: sunny && hasCu ? r0(parcel.lcl) : null,
@@ -150,6 +161,9 @@ export function computeMetrics(spot: Spot, hour: HourInput, cfg: EngineConfig): 
     cloudCover: s.cloudCover,
     cloudHigh: Math.max(s.cloudHigh, s.cloudMid),
     swRad: r0(s.swRad),
+    sunAzimuth: sun.azimuth,
+    sunElevation: sun.elevation,
+    sunOnSlope,
   };
 }
 
@@ -179,12 +193,12 @@ export function scoreDimensions(
   cfg: EngineConfig,
 ): Record<DimensionKey, DimensionScore> {
   // A: Windkomfort
-  const wReasons: string[] = [`Start: ${r0(m.takeoffWindKmh)} km/h aus ${compass(m.takeoffWindDir)}`];
+  const wReasons: string[] = [`Grundwind am Start ${r0(m.takeoffWindKmh)} km/h aus ${compass(m.takeoffWindDir)}`, `Böen bis ${r0(m.gustKmh)} km/h`];
   const sTake = curve(cfg.wind.takeoff, m.takeoffWindKmh);
   const sLayer = curve(cfg.wind.takeoff, m.layerMaxWindKmh) - cfg.wind.layerOffset;
-  const sGust = curve(cfg.wind.gustSpread, m.gustSpreadKmh) - cfg.wind.gustOffset;
+  // Böen zählen beim Wind als absoluter Wert, eine Stufe unter dem gleichen Grundwind; wie böig es ist, bewertet die Turbulenz
+  const sGust = curve(cfg.wind.takeoff, m.gustKmh) - cfg.wind.gustOffset;
   if (sLayer > sTake) wReasons.push(`in der Flugschicht bis ${r0(m.layerMaxWindKmh)} km/h`);
-  if (sGust > sTake && sGust > 0.5) wReasons.push(`Böen bis ${r0(m.gustKmh)} km/h`);
   const wind = makeScore('wind_comfort', Math.max(sTake, sLayer, sGust, 0), wReasons);
 
   // B: Thermik-Charakter
@@ -194,14 +208,14 @@ export function scoreDimensions(
     thermal = 0;
     tReasons.push('keine Sonneneinstrahlung');
   } else {
-    tReasons.push(`w* ${m.wStar} m/s, Steigen ca. ${m.climbEstimate} m/s`);
-    if (m.tiMin !== null) tReasons.push(`TI bis ${m.tiMin} K`);
+    tReasons.push(`w* ${de1(m.wStar)} m/s, Steigen ca. ${de1(m.climbEstimate)} m/s`);
+    if (m.tiMin !== null) tReasons.push(`TI bis ${de1(m.tiMin)} K`);
     if (m.workingHeight < 150) {
       thermal = Math.min(thermal, 0.5);
       tReasons.push('Thermik reicht kaum über den Start');
     } else if (m.workingHeight < 400) {
       thermal = Math.min(thermal, 1.5);
-      tReasons.push(`nur ${m.workingHeight} m Thermik über dem Start`);
+      tReasons.push(`Thermik nur ${aboveStart(m.workingHeight)}`);
     }
   }
   const capeScore = curve(cfg.thermal.cape, m.cape);
@@ -216,16 +230,14 @@ export function scoreDimensions(
 
   // C: Scherung und Turbulenz
   const cReasons: string[] = [];
+  // Böen gegen Grundwind nach Marvins Matrix (ersetzt Böenabstand und Böenfaktor)
   const parts: { s: number; why: string }[] = [
-    { s: curve(cfg.shear.shear, m.shearPerKm), why: `Windscherung ${m.shearPerKm} m/s pro km` },
-    { s: curve(cfg.shear.gustSpread, m.gustSpreadKmh), why: `Böen ${r0(m.gustSpreadKmh)} km/h über Mittelwind` },
+    { s: curve(cfg.shear.shear, m.shearPerKm), why: `Windscherung ${de1(m.shearPerKm)} m/s pro km` },
+    { s: gustTurbulenceScore(m.gustLevel), why: `Böen ${r0(m.gustKmh)} km/h bei ${r0(m.takeoffWindKmh)} km/h Grundwind: ${gustLabel(m.gustLevel)}` },
   ];
-  if (m.gustFactor !== null) {
-    parts.push({ s: curve(cfg.shear.gustFactor, m.gustFactor), why: `Böenfaktor ${m.gustFactor}` });
-  }
   if (m.wStar >= 0.8) {
     const ratio = m.layerMeanWindKmh / KMH / m.wStar;
-    parts.push({ s: curve(cfg.shear.windToThermal, ratio), why: `Wind zerreißt die Bärte (Wind/w* = ${r1(ratio)})` });
+    parts.push({ s: curve(cfg.shear.windToThermal, ratio), why: `Wind zerreißt die Bärte (Wind/w* = ${de1(r1(ratio))})` });
     parts.push({ s: curve(cfg.shear.thermalTurbulence, m.wStar), why: 'kräftige Thermik selbst' });
   }
   parts.sort((a, b) => b.s - a.s);
@@ -250,9 +262,10 @@ export function scoreDimensions(
     struct = 0;
     dReasons.push('ohne Einstrahlung keine Thermik');
   } else {
-    if (m.cloudBaseMsl !== null) dReasons.push(`Basis ${m.cloudBaseMsl} m (${m.cloudBaseMsl - spot.elevation} m über Start)`);
-    else dReasons.push(`Blauthermik bis ${m.thermalTopMsl} m (${m.workingHeight} m über Start)`);
-    if (m.inversion) dReasons.push(`Inversion ab ${m.inversion.baseMsl} m (+${m.inversion.strengthK} K)`);
+    dReasons.push(`mögliche Überhöhung ${aboveStart(m.workingHeight)}, Einschätzung: ${climbOutlook(m)}`);
+    if (m.cloudBaseMsl !== null) dReasons.push(`Basis ${alt100(m.cloudBaseMsl)}`);
+    else dReasons.push(`Blauthermik bis ${alt100(m.thermalTopMsl)}`);
+    if (m.inversion) dReasons.push(`Deckel: Inversion ab ${alt100(m.inversion.baseMsl)} (+${de1(m.inversion.strengthK)} K)`);
     if (overdev > struct) {
       struct = overdev;
       dReasons.push('hochreichende Konvektion möglich');
@@ -292,8 +305,8 @@ export function checkRules(spot: Spot, hour: HourInput, m: HourMetrics, cfg: Eng
       code: 'lowbase',
       text:
         m.cloudBaseMsl <= spot.elevation
-          ? `Basis ${m.cloudBaseMsl} m, also unter dem Start: Start zeitweise in der Wolke`
-          : `Basis ${m.cloudBaseMsl} m, zu knapp über dem Start`,
+          ? `Basis ${alt100(m.cloudBaseMsl)}, also unter dem Start: Start zeitweise in der Wolke`
+          : `Basis ${alt100(m.cloudBaseMsl)}, zu knapp über dem Start`,
     });
   }
   if (m.takeoffWindKmh > spot.maxWindKmh) {
@@ -301,6 +314,8 @@ export function checkRules(spot: Spot, hour: HourInput, m: HourMetrics, cfg: Eng
   }
   if (m.gustKmh > spot.maxWindKmh + rules.gustMarginKmh) {
     noGo.push({ code: 'gust', text: `Böen bis ${r0(m.gustKmh)} km/h` });
+  } else if (hour.isDay && m.gustLevel >= 5.75) {
+    noGo.push({ code: 'gust', text: `Böen ${r0(m.gustKmh)} km/h bei ${r0(m.takeoffWindKmh)} km/h Grundwind: viel zu böig` });
   }
   // Starts im Wald oder in Schneisen vertragen weniger Seiten- und Rückenwind
   const directionLimit = spot.needsHeadwind ? rules.minWindForDirectionLaneKmh : rules.minWindForDirectionKmh;
@@ -353,7 +368,11 @@ export function checkRules(spot: Spot, hour: HourInput, m: HourMetrics, cfg: Eng
   if (hour.isDay) {
     if (m.layerMaxWindKmh >= m.takeoffWindKmh + 12) warnings.push(`oben deutlich windiger (bis ${r0(m.layerMaxWindKmh)} km/h)`);
     if (m.cape >= 300) warnings.push(`Labile Luft (CAPE ${m.cape} J/kg), Überentwicklung beobachten`);
-    if (m.inversion && m.inversion.baseMsl >= spot.elevation - 50 && m.inversion.baseMsl < spot.elevation + 300) {
+    if (m.inversion && m.inversion.strengthK >= rules.strongInversionK && m.inversion.baseMsl >= spot.elevation - 50) {
+      warnings.push(
+        `Kräftige Inversion ab ${alt100(m.inversion.baseMsl)} (+${de1(m.inversion.strengthK)} K)${m.inversion.baseMsl < spot.elevation + 300 ? ', knapp über dem Start' : ''}: beim Durchstoßen kann es ruppig werden`,
+      );
+    } else if (m.inversion && m.inversion.baseMsl >= spot.elevation - 50 && m.inversion.baseMsl < spot.elevation + 300) {
       warnings.push('Inversion knapp über dem Start');
     } else if (m.inversion && m.inversion.baseMsl < spot.elevation - 50) {
       warnings.push('Bodeninversion unter dem Start: kalte, stabile Luft im Tal');
@@ -362,11 +381,73 @@ export function checkRules(spot: Spot, hour: HourInput, m: HourMetrics, cfg: Eng
     if (spot.airspace && m.workingHeight > 0) {
       const top = m.cloudBaseMsl ?? m.thermalTopMsl;
       if (top > spot.airspace.floorMsl) {
-        warnings.push(`Thermik reicht bis ${top} m: ${spot.airspace.note}`);
+        warnings.push(`Thermik reicht bis ${alt100(top)}: ${spot.airspace.note}`);
       }
     }
   }
   return { noGo, warnings };
+}
+
+/** Ob Überhöhen realistisch ist: aus Arbeitshöhe und geschätztem Steigen */
+export function climbOutlook(m: HourMetrics): 'realistisch' | 'begrenzt' | 'unwahrscheinlich' {
+  if (m.workingHeight < 300 || m.climbEstimate < 0.2) return 'unwahrscheinlich';
+  if (m.workingHeight < 700 || m.climbEstimate < 0.6) return 'begrenzt';
+  return 'realistisch';
+}
+
+/**
+ * Soaring-Stunde nach Marvins Antwort (28.11.2026): Gegenwind ab 15 km/h aus höchstens 30° neben der Startrichtung,
+ * geringe Böigkeit, wenig Turbulenz. Für welchen Modus sie mindestens taugt:
+ * - Chill: 15–20 km/h Grundwind, sehr geringe Böigkeit, wenig bis keine Thermik
+ * - Flow: stärker (bis etwa 20/30) oder etwas böiger
+ * - Push: sehr kräftig (ab etwa 23 km/h oder Böen über 30) oder Soaring mit Thermik
+ * Die persönlichen Grenzen beim Wind entscheiden dann, ob es für den Piloten passt („abhängig vom Character“).
+ */
+export function soaringMode(m: HourMetrics, dims: Record<DimensionKey, DimensionScore>, cfg: EngineConfig): Goal | null {
+  const r = cfg.rules;
+  if (!m.takeoffInSector || m.takeoffWindKmh < r.soaringMinHeadwindKmh || m.gustKmh > r.soaringMaxGustKmh) return null;
+  if (offFacingDeg(m) > 30 || m.gustLevel > 2.5 || dims.shear_turbulence.score > 3) return null;
+  let mode: Goal;
+  if (dims.thermic_character.score >= 2) mode = 'push';
+  else if (m.takeoffWindKmh >= 23 || m.gustKmh > 30) mode = 'push';
+  else if (m.takeoffWindKmh > 20 || m.gustKmh > 25 || m.gustLevel >= 1.5 || dims.thermic_character.score > 1.5) mode = 'flow';
+  else mode = 'chill';
+  // Strahlungstag mit Sonne auf dem Hang: lokal thermisch, Ablösungen machen das Soaring eine Stufe lebhafter
+  if (m.sunOnSlope && mode !== 'push') mode = mode === 'chill' ? 'flow' : 'push';
+  return mode;
+}
+
+/** Winkel zwischen Wind am Start und Startrichtung (0 = genau von vorn) */
+export function offFacingDeg(m: HourMetrics): number {
+  if (m.takeoffWindKmh <= 0) return 0;
+  return Math.round((Math.atan2(m.crosswindKmh, m.headwindKmh) * 180) / Math.PI);
+}
+
+const SOAR_TEXT: Record<Goal, string> = {
+  chill: 'ruhiges Soaring, passt auch für Chill',
+  flow: 'kräftiges Soaring, eher Flow',
+  push: 'sehr kräftiges oder thermisches Soaring, eher Push',
+};
+
+/** Hinweise: Soaring mit Modus, und woher deutliche Böen kommen können */
+export function windHints(m: HourMetrics, dims: Record<DimensionKey, DimensionScore>, spot: Spot): string[] {
+  const out: string[] = [];
+  if (m.soaringMode) {
+    out.push(`Soaringbedingungen: ${r0(m.headwindKmh)} km/h Gegenwind, Böen bis ${r0(m.gustKmh)} km/h, ${SOAR_TEXT[m.soaringMode]}. Prüfe, ob der Hang Soaring hergibt.`);
+    if (m.sunOnSlope) out.push('Sonne auf dem Hang: lokal thermisch, mit Ablösungen am Hang. Das Soaring wird lebhafter als der Wind allein vermuten lässt.');
+    else if (m.swRad >= 300) out.push('Hang im Schatten: trotz Sonne eher laminares Soaring, Thermik eher an sonnigen Nachbarhängen.');
+  }
+  if (m.gustKmh - m.takeoffWindKmh >= 10) {
+    const causes: string[] = [];
+    if (m.shearPerKm >= 4) causes.push('Windscherung');
+    if (dims.thermic_character.score >= 1.5) causes.push('thermische Turbulenz');
+    if (m.windAboveKmh >= 10 && !inSector(m.windAboveDir, spot.windSector)) causes.push('Lee');
+    if (m.cape >= 300) causes.push('Schauer- oder Gewitterböen');
+    if (causes.length === 0) causes.push('Düsen oder Geländeeffekte, oder das Modell überschätzt die Böen');
+    const low = m.takeoffWindKmh < 10 ? ' Bei schwachem Grundwind heißt das vor allem: wechselnde Windrichtung am Start.' : '';
+    out.push(`Böen deutlich über dem Grundwind, hinterfragen. Mögliche Ursache: ${causes.join(', ')}.${low}`);
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -389,14 +470,14 @@ export function classifyZone(
   if (D >= z.noGoStructure || T >= 4.8) return { zone: 'no-go', label: 'No-Go (Überentwicklung)' };
   const sporty = Math.max(W, S, T) >= 3.5;
   if (T >= z.xcThermal && D >= z.xcStructure && W <= z.xcMaxWind && S <= z.xcMaxShear) {
-    return { zone: 'xc', label: sporty ? 'XC (sportlich)' : 'XC' };
+    return { zone: 'xc', label: sporty ? 'Streckenwetter, sportlich' : 'Streckenwetter' };
   }
-  if (T >= z.progressThermal || W >= z.progressWind || S >= z.progressShear) {
-    if (sporty) return { zone: 'progress', label: 'Progress (sportlich)' };
-    if (T < 1.5 && W >= z.progressWind) return { zone: 'progress', label: 'Progress (Soaring im Wind)' };
-    if (T < 1.5 && S >= z.progressShear) return { zone: 'progress', label: 'Progress (unruhige Luft)' };
-    return { zone: 'progress', label: 'Progress' };
+  if (T >= z.livelyThermal || W >= z.livelyWind || S >= z.livelyShear) {
+    if (sporty) return { zone: 'lively', label: 'lebhaft, sportlich' };
+    if (T < 1.5 && W >= z.livelyWind) return { zone: 'lively', label: 'Soaring im Wind' };
+    if (T < 1.5 && S >= z.livelyShear) return { zone: 'lively', label: 'unruhige Luft' };
+    return { zone: 'lively', label: 'lebhaft, thermisch' };
   }
-  if (T < 0.8) return { zone: 'chill', label: 'Chill (Abgleiter)' };
-  return { zone: 'chill', label: 'Chill' };
+  if (T < 0.8) return { zone: 'calm', label: 'ruhig, kaum Thermik' };
+  return { zone: 'calm', label: 'ruhig, leichte Thermik' };
 }

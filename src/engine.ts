@@ -2,18 +2,21 @@
 
 import type { ForecastData, HourEvaluation, HourInput, PilotProfile, Spot, SpotEvaluation } from './types.ts';
 import { DEFAULT_CONFIG, type EngineConfig } from './config.ts';
-import { checkRules, classifyZone, computeMetrics, scoreDimensions } from './evaluate.ts';
+import { checkRules, classifyZone, computeMetrics, scoreDimensions, soaringMode, windHints } from './evaluate.ts';
 import { personalFit } from './profile.ts';
 import { summarizeDays } from './windows.ts';
 import { compass } from './physics.ts';
+import { alt100 } from './format.ts';
 
 export function evaluateHour(spot: Spot, hour: HourInput, pilot: PilotProfile, cfg: EngineConfig = DEFAULT_CONFIG): HourEvaluation {
   const metrics = computeMetrics(spot, hour, cfg);
   const dimensions = scoreDimensions(spot, hour, metrics, cfg);
   const { noGo, warnings } = checkRules(spot, hour, metrics, cfg);
   const { zone, label } = classifyZone(dimensions, noGo, cfg);
-  const fit = personalFit(dimensions, zone, noGo, pilot);
-  return { time: hour.time, isDay: hour.isDay, metrics, dimensions, noGo, warnings, zone, zoneLabel: label, fit, summary: summarize(spot, metrics, dimensions, noGo, label) };
+  metrics.soaringMode = zone === 'no-go' ? null : soaringMode(metrics, dimensions, cfg);
+  const fit = personalFit(dimensions, zone, noGo, pilot, metrics, spot.id);
+  const hints = zone === 'no-go' ? [] : windHints(metrics, dimensions, spot);
+  return { time: hour.time, isDay: hour.isDay, metrics, dimensions, noGo, warnings, hints, zone, zoneLabel: label, fit, summary: summarize(spot, metrics, dimensions, noGo, label) };
 }
 
 function summarize(
@@ -27,9 +30,9 @@ function summarize(
   const parts: string[] = [];
   parts.push(`Thermik ${d.thermic_character.label}`);
   if (m.wStar > 0) parts.push(`Steigen ca. ${m.climbEstimate} m/s`);
-  if (m.cloudBaseMsl !== null) parts.push(`Basis ${m.cloudBaseMsl} m`);
-  else if (m.workingHeight > 0) parts.push(`Thermik bis ${m.thermalTopMsl} m`);
-  parts.push(`Wind ${Math.round(m.takeoffWindKmh)} km/h aus ${compass(m.takeoffWindDir)}`);
+  if (m.cloudBaseMsl !== null) parts.push(`Basis ${alt100(m.cloudBaseMsl)}`);
+  else if (m.workingHeight > 0) parts.push(`Thermik bis ${alt100(m.thermalTopMsl)}`);
+  parts.push(`Grundwind ${Math.round(m.takeoffWindKmh)} km/h aus ${compass(m.takeoffWindDir)}, Böen ${Math.round(m.gustKmh)} km/h`);
   parts.push(d.shear_turbulence.label);
   return `${label}: ${parts.join(', ')}`;
 }
@@ -57,6 +60,6 @@ export function evaluateForecast(
  * Die Wetterbewertung (Kennwerte, Dimensionen, No-Go, Zone) hängt nicht vom Profil ab und bleibt, wie sie ist.
  */
 export function rescoreForPilot(ev: SpotEvaluation, pilot: PilotProfile, cfg: EngineConfig = DEFAULT_CONFIG): SpotEvaluation {
-  const hours = ev.hours.map((h) => ({ ...h, fit: personalFit(h.dimensions, h.zone, h.noGo, pilot) }));
+  const hours = ev.hours.map((h) => ({ ...h, fit: personalFit(h.dimensions, h.zone, h.noGo, pilot, h.metrics, ev.spot.id) }));
   return { ...ev, hours, days: summarizeDays(hours, cfg) };
 }

@@ -13,7 +13,7 @@ import { fetchRaw, parseResponse, type OpenMeteoResponse } from '../src/openmete
 import { evaluateForecast } from '../src/engine.ts';
 import { compass } from '../src/physics.ts';
 import { ZONE_NAMES } from '../src/windows.ts';
-import { GOAL_NAMES } from '../src/profile.ts';
+import { GOAL_NAMES, PZONE_NAMES } from '../src/profile.ts';
 import type { DaySummary, HourEvaluation, PilotProfile, Site, Spot, SpotEvaluation } from '../src/types.ts';
 
 const root = new URL('..', import.meta.url).pathname;
@@ -83,9 +83,9 @@ function relevantDays(ev: SpotEvaluation): DaySummary[] {
 /** Kurzform für die Überblickstabelle */
 function shortVerdict(day: DaySummary): string {
   if (day.windows.length > 0) {
-    return day.windows.map((w) => `**${w.start.slice(0, 2)}–${w.end.slice(0, 2)} ${ZONE_NAMES[w.zone]}** (${w.fitMax})`).join(', ');
+    return day.windows.map((w) => `**${w.start.slice(0, 2)}–${w.end.slice(0, 2)} ${PZONE_NAMES[w.personalZone]}** (${w.fitMax})`).join(', ');
   }
-  if (day.bestHour) return `knapp: ${day.bestHour.time.slice(11, 13)} Uhr ${ZONE_NAMES[day.bestHour.zone]} (${day.bestHour.fit.score})`;
+  if (day.bestHour) return `knapp: ${day.bestHour.time.slice(11, 13)} Uhr ${ZONE_NAMES[day.bestHour.zone]}, ${PZONE_NAMES[day.bestHour.fit.personalZone]} (${day.bestHour.fit.score})`;
   return `– ${day.noGoReasons[0]?.reason ?? 'nicht fliegbar'}`;
 }
 
@@ -108,7 +108,7 @@ function hourRow(h: HourEvaluation): string {
     const culprits = Object.values(d).filter((x) => x.score >= 4.5);
     why = culprits.map((x) => `${x.label}: ${x.reasons.join(', ')}`).join('; ') || why;
   }
-  const fit = h.zone === 'no-go' ? '–' : `${h.fit.score}`;
+  const fit = h.zone === 'no-go' ? '–' : `${h.fit.score} ${PZONE_NAMES[h.fit.personalZone]}`;
   return `| ${h.time.slice(11, 16)} | ${h.zoneLabel} | ${fit} | ${d.wind_comfort.display} | ${d.thermic_character.display} | ${d.shear_turbulence.display} | ${d.structure_cap.display} | ${keyData.join(' · ')} | ${why || '–'} |`;
 }
 
@@ -123,9 +123,9 @@ function renderMarkdown(evals: SpotEvaluation[]): string {
   const lines: string[] = [];
   lines.push('# Flugwetter-Auswertung Schwarzwald (Prototyp)');
   lines.push('');
-  lines.push(`Vorhersage vom ${stamp} · Modell ICON des DWD (D2 und EU kombiniert) über Open-Meteo · Pilotenprofil: ${goal} · ${groups.length} Gelände, ${evals.length} Startplätze`);
+  lines.push(`Vorhersage vom ${stamp} · Modell ICON des DWD (D2 und EU kombiniert) über Open-Meteo · Tagesmodus: ${goal} · ${groups.length} Gelände, ${evals.length} Startplätze`);
   lines.push('');
-  lines.push('Pro Stunde bewertet die Engine vier Dimensionen auf einer Skala von 0 bis 5 mit Unterstufen (zum Beispiel „2+“), ordnet eine Zone zu (Chill, Progress, XC, No-Go) und rechnet aus, wie gut die Stunde zu deinem Profil passt (0 bis 100). Zusammenhängende Stunden ab einer Passung von 60 ergeben ein Flugfenster.');
+  lines.push('Pro Stunde bewertet die Engine vier Dimensionen auf einer Skala von 0 bis 5 mit Unterstufen (zum Beispiel „2+“) und den Lufttyp (ruhig, lebhaft, Streckenwetter oder No-Go). Aus deinen Grenzen ergibt sich die persönliche Zone (Komfort, Progress, Challenge, Überforderung) und die Passung zum Tagesmodus (0 bis 100). Zusammenhängende Stunden ab einer Passung von 60 ergeben ein Flugfenster; der Modus Chill lässt nur Komfort zu, Flow bis Progress, Push bis Challenge. Dazu kommen die persönlichen Startbedingungen (Seiten- und Rückenwind, Rückwärtsaufziehen).');
   lines.push('');
 
   // Überblick: Startplätze als Zeilen, Tage als Spalten
@@ -199,7 +199,7 @@ function renderMarkdown(evals: SpotEvaluation[]): string {
           lines.push(`Gründe gegen das Fliegen: ${day.noGoReasons.map((r) => `${r.reason} (${r.hours} h)`).join(', ')}`);
           lines.push('');
         }
-        lines.push('| Uhr | Zone | Passung | Wind | Thermik | Scherung | Deckel | Kennwerte | Begründung |');
+        lines.push('| Uhr | Lufttyp | Passung, Zone | Wind | Thermik | Turbulenz | Überhöhung | Kennwerte | Begründung |');
         lines.push('|---|---|---|---|---|---|---|---|---|');
         for (const h of dayHours) lines.push(hourRow(h));
         lines.push('');
@@ -211,8 +211,8 @@ function renderMarkdown(evals: SpotEvaluation[]): string {
   lines.push('');
   lines.push('- **Wind (Windkomfort):** Wind in Starthöhe, 0 = unter 1 km/h, 1 = 5, 2 = 10, 3 = 15, 4 = 22, 5 = ab 30 km/h. Deutlich stärkerer Wind in der Flugschicht oder kräftige Böen heben die Stufe an.');
   lines.push('- **Thermik:** aus der konvektiven Geschwindigkeit w* (Einstrahlung und Höhe der Thermikschicht). 1 = w* 1 m/s, 2 = 1,5, 3 = 2,0, 4 = 2,6, 5 = ab 3,3 m/s oder Überentwicklungspotenzial. Reicht die Thermik kaum über den Start, wird gedeckelt.');
-  lines.push('- **Scherung/Turbulenz:** der stärkste von mehreren Treibern: Windscherung in der Flugschicht (m/s pro km), Böen über dem Grundwind, Böenfaktor, Wind im Verhältnis zur Thermikstärke (zerrissene Bärte) und kräftige Thermik selbst. Kommen mehrere zusammen, gibt es einen Aufschlag. Höhenwind aus anderer Richtung als am Start erhöht den Wert (Lee).');
-  lines.push('- **Struktur/Deckel:** nutzbare Höhe über dem Start bis Thermikobergrenze oder Basis: 1 = ca. 350 m, 2 = 700 m, 3 = 1200 m, 4 = über 2000 m oder hochreichende Konvektion.');
+  lines.push('- **Turbulenz / Scherung:** der stärkste von mehreren Treibern: Windscherung in der Flugschicht (m/s pro km), Böen über dem Grundwind, Böenfaktor, Wind im Verhältnis zur Thermikstärke (zerrissene Bärte) und kräftige Thermik selbst. Kommen mehrere zusammen, gibt es einen Aufschlag. Höhenwind aus anderer Richtung als am Start erhöht den Wert (Lee).');
+  lines.push('- **Mögliche Überhöhung / Deckel:** nutzbare Höhe über dem Start bis Thermikobergrenze oder Basis: 1 = ca. 350 m, 2 = 700 m, 3 = 1200 m, 4 = über 2000 m oder hochreichende Konvektion.');
   lines.push('- **No-Go** gilt bei Nacht, Niederschlag, Gewitter, Nebel, Start in der Wolke, Basis knapp über dem Start, zu viel Wind oder Böen, Wind aus falscher Richtung ab 8 km/h (bei Starts im Wald schon ab 5 km/h), Höhenwind von hinten ab 12 km/h (Lee) und den Gefahrenregeln der Gelände.');
   lines.push('- **Passung:** 100 minus Abzüge, wenn eine Dimension über deiner Toleranz aus der user_konfig liegt (gewichtet), und minus 25, wenn es für dein Ziel nicht reicht.');
   lines.push('');
